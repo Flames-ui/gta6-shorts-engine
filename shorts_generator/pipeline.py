@@ -21,10 +21,11 @@ def _run_local(
     aspect_ratio: str,
     download_format: str,
     language: Optional[str],
+    llm_provider: Optional[str] = None,
 ) -> Dict:
     from .local.clipper import crop_highlights_local
     from .local.downloader import download_youtube_local
-    from .local.llm import call_local_llm
+    from .local.llm import call_local_llm, call_gemini_llm, call_openai_llm
     from .local.transcriber import transcribe_local
 
     source_path = download_youtube_local(youtube_url, fmt=download_format)
@@ -35,7 +36,15 @@ def _run_local(
             "Whisper produced no segments. The video may have no detectable speech."
         )
 
-    highlights_result = get_highlights(transcript, num_clips=num_clips, llm_fn=call_local_llm)
+    provider = (llm_provider or LLM_PROVIDER or "gemini").strip().lower()
+    if provider == "gemini":
+        llm_fn = call_gemini_llm
+    elif provider == "openai":
+        llm_fn = call_openai_llm
+    else:
+        llm_fn = call_local_llm
+
+    highlights_result = get_highlights(transcript, num_clips=num_clips, llm_fn=llm_fn)
     all_highlights: List[Dict] = highlights_result.get("highlights", [])
     if not all_highlights:
         raise RuntimeError("Highlight generator returned zero clips.")
@@ -95,6 +104,7 @@ def generate_shorts(
     download_format: str = "720",
     language: Optional[str] = None,
     mode: str = "api",
+    llm_provider: Optional[str] = None,
 ) -> Dict:
     """Run the full pipeline and return a structured result.
 
@@ -106,6 +116,7 @@ def generate_shorts(
         language: ISO-639-1 to force Whisper language detection.
         mode: "api" (default, MuAPI) or "local" (yt-dlp + faster-whisper +
             OpenAI or Gemini + ffmpeg).
+        llm_provider: "gemini" or "openai" (local mode).
 
     Returns:
         {
@@ -118,14 +129,14 @@ def generate_shorts(
     """
     mode = (mode or "api").lower()
     if mode == "local":
-        provider = (LLM_PROVIDER or "openai").strip().lower()
+        provider = (llm_provider or LLM_PROVIDER or "gemini").strip().lower()
         if provider == "openai":
             require_openai_key()
         elif provider == "gemini":
             require_gemini_key()
         else:
             raise RuntimeError(f"Unknown LLM_PROVIDER={provider!r}. Use 'openai' or 'gemini'.")
-        return _run_local(youtube_url, num_clips, aspect_ratio, download_format, language)
+        return _run_local(youtube_url, num_clips, aspect_ratio, download_format, language, llm_provider=provider)
     if mode == "api":
         require_api_key()
         return _run_api(youtube_url, num_clips, aspect_ratio, download_format, language)

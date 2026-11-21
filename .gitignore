@@ -6,3 +6,8 @@ venv/
 output/
 *.mp4
 .DS_Store
+.pytest_cache/
+*.sqlite
+*.db
+app_dev.db
+*.log

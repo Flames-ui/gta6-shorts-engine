@@ -1,0 +1,104 @@
+# Render Blueprint Specification for GTA 6 Shorts Engine
+# Defines:
+# 1. gta6-shorts-engine (Web Service running FastAPI)
+# 2. gta6-shorts-worker (Background Worker running FFmpeg/Whisper/Gemini pipeline)
+# 3. gta6-shorts-redis (Private Redis task queue)
+
+services:
+  # -------------------------------------------------------------
+  # 1. FastAPI Web API Service
+  # -------------------------------------------------------------
+  - type: web
+    name: gta6-shorts-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ENGINE_API_KEY
+        generateValue: true
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: gta6-shorts-redis
+          property: connectionString
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: gta6-shorts
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: YOUTUBE_CLIENT_ID
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_REDIRECT_URI
+        sync: false
+
+  # -------------------------------------------------------------
+  # 2. Background Video Processing Worker
+  # -------------------------------------------------------------
+  - type: worker
+    name: gta6-shorts-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker
+    plan: standard # 2GB+ RAM recommended for Whisper & FFmpeg processing
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: gta6-shorts-redis
+          property: connectionString
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: gta6-shorts
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: LOCAL_WHISPER_MODEL
+        value: base
+      - key: LOCAL_WHISPER_DEVICE
+        value: cpu
+
+  # -------------------------------------------------------------
+  # 3. Private Redis Instance (Internal Network)
+  # -------------------------------------------------------------
+  - type: redis
+    name: gta6-shorts-redis
+    ipAllowList: [] # Accessible only via Render Private Network
+    plan: starter
+    maxmemoryPolicy: noeviction

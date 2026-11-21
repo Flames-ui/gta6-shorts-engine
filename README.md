@@ -1,320 +1,366 @@
-# AI YouTube Shorts Generator
+# GTA 6 Shorts Engine — Production Backend & Render Deployment
 
-[![Powered by MuAPI](https://img.shields.io/badge/Powered%20by-MuAPI-6366f1?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0tMSAxNHYtNGgtMnYtMmg0djZoLTJ6bTAtOFY2aDJ2MmgtMnoiLz48L3N2Zz4=)](https://muapi.ai?utm_source=github&utm_medium=badge&utm_campaign=ai-youtube-shorts-generator)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python)](https://python.org)
+[![Supabase](https://img.shields.io/badge/Supabase-Database%20%26%20Storage-3ECF8E?style=flat-square&logo=supabase)](https://supabase.com)
+[![Redis RQ](https://img.shields.io/badge/Queue-Redis%20RQ-DC382D?style=flat-square&logo=redis)](https://python-rq.org)
+[![Render](https://img.shields.io/badge/Deploy-Render%20Blueprint-46E3B7?style=flat-square&logo=render)](https://render.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+A production-grade, asynchronous video processing engine engineered for generating high-engagement, viral vertical shorts (9:16) from long-form YouTube content and authorized video sources. Powered by Google Gemini 2.5 Flash / OpenAI for highlight detection, Whisper speech-to-text transcription, FFmpeg vertical framing, Supabase cloud persistence, Redis RQ background workers, and automated YouTube publishing workflows.
 
-**The open-source alternative to Opus Clip, Vidyo.ai, Klap, SubMagic, 2short.ai, and other AI clipping tools.** Drop in any long-form YouTube video and get back ranked, viral-ready 9:16 shorts — for free, with no per-clip credits, no watermarks, and full control over the highlight algorithm.
-
-Built for creators, agencies, and developers who don't want to pay $20–$300/month or be capped on minutes processed. Uses GPT-class LLM highlight detection and Whisper transcription to extract the most viral-worthy moments and auto-crop them vertically for TikTok, Reels, and Shorts.
-
-<p align="center"><a href="https://www.youtube.com/watch?v=eVOV_WK4yHw"><img src="https://i.ytimg.com/vi/eVOV_WK4yHw/maxresdefault.jpg" width="720"></a></p>
-<p align="center"><a href="https://www.youtube.com/watch?v=eVOV_WK4yHw"><b>▶  Watch: Seedance 2.5 Flash API: Nearly 2x Faster, 34% Cheaper (How to Use It) </b></a></p>
-
-> **Building your own Opus Clip–style SaaS?** Skip the infra and ship on the same APIs that power this repo:
-> - [AI Clipping API](https://muapi.ai/playground/ai-clipping?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) — end-to-end clip selection + render
-> - [Auto-Crop API](https://muapi.ai/playground/autocrop?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) — vertical reframing only
-
-![longshorts](https://github.com/user-attachments/assets/3f5d1abf-bf3b-475f-8abf-5e253003453a)
-
-<p align="center">
-  <a href="https://github.com/Anil-matcha/awesome-generative-ai-apps">
-    <img src="https://img.shields.io/badge/Part%20of-Awesome%20Generative%20AI%20Apps-FFD700?style=for-the-badge&logo=github&logoColor=black" alt="Awesome Generative AI Apps">
-  </a>
-</p>
-
-> 🎨 **[Explore 50+ more open-source AI apps →](https://github.com/Anil-matcha/awesome-generative-ai-apps)**
-
-## Why Use This Instead of Opus Clip / Vidyo.ai / Klap?
-
-| | This repo | Opus Clip / Vidyo.ai / Klap / SubMagic |
-|---|---|---|
-| **Price** | Free + open source (pay only for API usage) | $20–$300/month subscriptions |
-| **Per-clip credits** | None — process unlimited videos | Monthly minute caps, overage fees |
-| **Watermarks** | Never | On free tiers |
-| **Highlight algorithm** | Fully editable virality framework | Black box |
-| **Output format** | Any aspect ratio, any resolution | Locked presets |
-| **Batch processing** | `xargs` an entire URL list | Manual upload one-by-one |
-| **JSON / API output** | Built-in (`--output-json`) | Limited or paid tier only |
-| **Self-hostable** | Yes — runs on your machine or server | SaaS only, your videos sit on their servers |
-| **White-label / embeddable** | Yes — MIT licensed, import as Python lib | No |
-
-## Features
-
-- **🎬 YouTube In, Vertical Out**: Hand it any YouTube URL — get back N viral-ready 9:16 mp4s
-- **🔀 Two Modes — API (fast) or Local (offline)**: Default `--mode api` uses MuAPI for download/transcription/cropping; `--mode local` runs entirely on your machine with `yt-dlp`, `faster-whisper`, and `ffmpeg`/`opencv`, and lets you pick OpenAI or Gemini for highlight ranking
-- **🤖 Virality-Aware Highlight Selection**: Clips ranked on hooks, emotional peaks, opinion bombs, revelation moments, conflict, quotable lines, story peaks, and practical value — not just generic "interesting"
-- **📈 Score + Hook + Reason for Every Clip**: Each highlight comes with a viral score, an opening hook line, and a one-sentence explanation of why it works
-- **🎤 Whisper Transcription, Your Choice**: Cloud (`/openai-whisper` via MuAPI) or local (`faster-whisper`, CPU or CUDA) — same downstream output shape
-- **🧩 Long-Video Aware**: Videos over 30 minutes are auto-chunked with overlap so nothing gets missed
-- **♻️ Smart Dedupe**: Overlapping highlights are collapsed by score so you never get two near-duplicate clips
-- **🎯 Smart Vertical Crop**: API mode uses MuAPI's auto-crop; local mode runs OpenCV face tracking with motion smoothing
-- **📱 Any Aspect Ratio**: 9:16 for TikTok/Reels/Shorts, 1:1 for square, anything else by flag
-- **🧰 CLI + Python Library**: Use it from the shell or import `generate_shorts(...)` into your own pipeline
-- **📦 JSON Output**: `--output-json` dumps the full result (transcript + every candidate highlight + final clip URLs/paths) for downstream automation
-
-## Quick Start (No Setup)
-
-Don't want to self-host? The [AI Clipping API](https://muapi.ai/playground/ai-clipping?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) gives you the same Opus Clip–style pipeline as a single HTTP call — no Python, no dependencies, pay-per-clip instead of monthly subscriptions.
+Connected natively to Lovable web dashboards.
 
 ---
 
-## Installation (Self-Hosted)
+## 1. Architecture Overview
+
+```
+                      ┌───────────────────────────────────────────────┐
+                      │            Lovable Frontend App               │
+                      │  (Dashboard, Queue, Player, Approval Flow)   │
+                      └───────────────────────┬───────────────────────┘
+                                              │ REST API (HTTPS + X-API-Key)
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                                Render Deployment Cloud                                  │
+│                                                                                         │
+│  ┌────────────────────────────────┐                 ┌────────────────────────────────┐  │
+│  │   gta6-shorts-engine (Web)     │                 │   gta6-shorts-worker (Worker)  │  │
+│  │   - FastAPI HTTP Server        │                 │   - Dedicated high-RAM/CPU    │  │
+│  │   - Pydantic Validation        │                 │   - FFmpeg 8.x + Whisper       │  │
+│  │   - SSRF Protection            │                 │   - Gemini AI Highlights       │  │
+│  │   - Job & Auth Management      │                 │   - Dynamic Social Metadata    │  │
+│  └───────────────┬────────────────┘                 └────────────────┬───────────────┘  │
+│                  │                                                   │                  │
+│                  │           ┌────────────────────────┐              │                  │
+│                  └──────────►│  Render Redis Queue    │◄─────────────┘                  │
+│                     Enqueue  │  (gta6_shorts default) │   Dequeue & Process             │
+│                              └────────────────────────┘                                 │
+└──────────────────────────────────────────┬──────────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              External Cloud Services                                    │
+│                                                                                         │
+│  ┌───────────────────────────────────────────┐   ┌───────────────────────────────────┐  │
+│  │           Supabase Cloud                  │   │        Google / AI APIs           │  │
+│  │   - Postgres: jobs, clips, logs           │   │   - Gemini 2.5 Flash / OpenAI     │  │
+│  │   - Storage: 9:16 rendered MP4 shorts     │   │   - YouTube Data API v3 (OAuth)   │  │
+│  │   - Row Level Security (RLS)              │   │     (Private-by-default shorts)   │  │
+│  └───────────────────────────────────────────┘   └───────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Architectural Principles:
+1. **Separation of Concerns**: FastAPI handlers respond in `<50ms` and never perform heavy video encoding. All downloads, AI calls, Whisper transcriptions, and FFmpeg renders are executed asynchronously in isolated background worker processes.
+2. **SSRF & Input Hardening**: Strict URL allowlisting permits only verified YouTube domains (`youtube.com`, `youtu.be`) and rejects arbitrary local file paths, private IP addresses (`10.0.0.0/8`, `192.168.0.0/16`, `169.254.169.254`), and non-HTTP protocols.
+3. **Stateless Compute with Cloud Persistence**: Neither the web service nor the background worker relies on ephemeral disk for permanent storage. Rendered clips and thumbnails are immediately uploaded to Supabase Storage, and processing metadata is saved to PostgreSQL.
+4. **Resilient Failovers**: If Supabase or Redis is temporarily unavailable during local development or unit testing, the system automatically uses an ACID-compliant SQLite fallback and in-process threaded job execution.
+
+---
+
+## 2. Local Setup Instructions
 
 ### Prerequisites
+- Python 3.11+
+- FFmpeg 6.0+ installed and available on `PATH`
+- Redis (optional for local queue testing, defaults to thread fallback if absent)
 
-- Python 3.10+
-- For **API mode (default)**: a MuAPI key — powers download, transcription, highlight ranking, and clipping in a single dependency
-- For **Local mode** (`--mode local`): `ffmpeg` on your PATH and an LLM API key (`OPENAI_API_KEY` or `GEMINI_API_KEY`; only the LLM step is remote)
-
-### Steps
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator.git
-   cd AI-Youtube-Shorts-Generator
-   ```
-
-2. **Create and activate a virtual environment:**
-   ```bash
-   python3.10 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. **Install Python dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   # Only if you plan to use --mode local:
-   pip install -r requirements-local.txt
-   ```
-
-4. **Set up environment variables:**
-
-   Create a `.env` file in the project root:
-   ```bash
-   # API mode (default)
-   MUAPI_API_KEY=your_muapi_key_here
-
-   # Local mode (--mode local)
-   LLM_PROVIDER=openai         # openai or gemini
-   OPENAI_API_KEY=your_openai_key_here
-   OPENAI_MODEL=gpt-4o-mini          # optional, default gpt-4o-mini
-   GEMINI_API_KEY=your_gemini_key_here
-   GEMINI_MODEL=gemini-2.5-flash      # optional, default gemini-2.5-flash
-   LOCAL_WHISPER_MODEL=base          # tiny / base / small / medium / large-v3
-   LOCAL_WHISPER_DEVICE=auto         # auto / cpu / cuda
-   LOCAL_OUTPUT_DIR=output           # where local mp4s land
-   ```
-
-## Usage
-
-### Single video (API mode — default)
-
+### Step 1: Clone and Create Virtual Environment
 ```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID"
+git clone https://github.com/Flames-ui/gta6-shorts-engine.git
+cd gta6-shorts-engine
+
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-### Single video (Local mode — runs offline except for the LLM call)
-
+### Step 2: Install Dependencies
 ```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID" --mode local
+pip install -r requirements.txt
 ```
 
-Local mode writes the rendered shorts to `./output/short_01.mp4`, `short_02.mp4`, … (override with `LOCAL_OUTPUT_DIR`).
-
-### Security notes
-
-- Replace the example API key values in `.env.example` before running a mode that uses them. The app rejects empty, placeholder, and short keys before it starts downloading or processing a video; OpenAI and Gemini keys are also checked for their provider prefix.
-- Remote video URLs must use HTTPS and an exact YouTube or `youtu.be` hostname. Local mode also accepts a local path or `file://` URL for trusted, single-user use.
-- If you expose this library through a web service, validate user input at the service boundary: accept only approved YouTube URLs and do not pass user-supplied paths or `file://` URLs to local mode. The library intentionally supports local files for CLI use.
-- `MUAPI_BASE_URL` must use HTTPS and the host `api.muapi.ai`. Other hosts are rejected because requests include the configured `MUAPI_API_KEY`.
-
-### With options
-
+### Step 3: Configure Environment Variables
 ```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID" \
-    --mode api \
-    --num-clips 5 \
-    --aspect-ratio 9:16 \
-    --output-json result.json
+cp .env.example .env
+# Edit .env and supply your GEMINI_API_KEY, SUPABASE_URL, and ENGINE_API_KEY
 ```
 
-### Local file or path
+### Step 4: Run the Services Locally
 
-In `--mode local`, you can pass a `file://` URL or a direct filesystem path and skip YouTube entirely:
-
+**Option A: Run the FastAPI Web Server**
 ```bash
-python main.py "/Users/you/Videos/input.mp4" --mode local
-python main.py "file:///Users/you/Videos/input.mp4" --mode local
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+Access the interactive Swagger documentation at `http://localhost:8000/docs`.
 
-The Python API works the same way:
-
-```python
-from shorts_generator import generate_shorts
-
-result = generate_shorts(
-    "/Users/you/Videos/input.mp4",
-    num_clips=5,
-    aspect_ratio="9:16",
-    mode="local",
-)
-for short in result["shorts"]:
-    print(short["score"], short["title"], short["clip_url"])
-```
-
-Local transcription is cached as an `.srt` file in `LOCAL_OUTPUT_DIR` using the
-video's base name. If the cache already exists and is newer than the source
-file, the app reuses it instead of running Whisper again.
-
-Local downloads are also cached in `LOCAL_OUTPUT_DIR` as
-`source_<youtube_id>.mp4` when the input is a YouTube URL. If that file already
-exists, the app skips `yt-dlp` and reuses the cached video.
-
-### Batch processing
-
-Create a `urls.txt` file with one URL per line, then:
-
+**Option B: Run the Background Worker**
 ```bash
-xargs -a urls.txt -I{} python main.py "{}"
+python3 -m app.worker
 ```
 
-### CLI flags
-
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--mode` | `api` | `api` (MuAPI, fast, no setup) or `local` (remote URL, `file://`, or local path + faster-whisper + LLM provider + ffmpeg) |
-| `--num-clips` | `3` | How many shorts to render |
-| `--aspect-ratio` | `9:16` | Any ratio; `9:16` for TikTok/Reels, `1:1` for square |
-| `--format` | `720` | Source download resolution: `360` / `480` / `720` / `1080` |
-| `--language` | auto | Force Whisper language code (e.g. `en`) |
-| `--output-json` | — | Dump the full result (transcript + all candidates) to a file |
-
-### API mode vs Local mode
-
-| Step | API mode (`--mode api`) | Local mode (`--mode local`) |
-|---|---|---|
-| Download | MuAPI `/youtube-download` | `yt-dlp` for remote URLs, direct file path for local inputs |
-| Transcription | MuAPI `/openai-whisper` | `faster-whisper` (CPU or CUDA) |
-| Highlight LLM | MuAPI `gpt-5-mini` | `LLM_PROVIDER=openai` uses OpenAI (`gpt-4o-mini` by default), `LLM_PROVIDER=gemini` uses Gemini (`gemini-2.5-flash` by default) |
-| Vertical crop | MuAPI `/autocrop` | `ffmpeg` + OpenCV face tracking |
-| Output | hosted URLs | local mp4 paths |
-| Required keys | `MUAPI_API_KEY` | `OPENAI_API_KEY` or `GEMINI_API_KEY` (+ `ffmpeg` on PATH) |
-
-## How It Works
-
-1. **Download**: Fetches the source video from YouTube
-2. **Transcribe**: MuAPI `/openai-whisper` produces a timestamped transcript (verbose_json segments)
-3. **Detect content type**: An LLM classifies the video (podcast, interview, tutorial, vlog, etc.) and density, so the prompt can be tuned per content style
-4. **Long-video chunking**: Videos > 30 min are split into 20-min overlapping chunks
-5. **Highlight ranking**: An LLM scans the transcript through a virality framework — hook moments, emotional peaks, opinion bombs, revelations, conflict, quotables, story peaks, practical value — and emits ranked candidates with scores 0–100
-6. **Dedupe**: Overlapping candidates are collapsed by score (>50% overlap → keep the higher score)
-7. **Top-N selection**: The top `--num-clips` candidates are selected
-8. **Auto-crop**: Each highlight is rendered as a vertical short at the requested aspect ratio
-
-**Output**: a list of mp4 URLs plus, for each clip, its title, viral score, hook sentence, and a one-line reason explaining why it should perform.
-
-## Output
-
-Console output looks like:
-
-```
-========================================================================
-Highlights:    7 candidates → kept top 3
-========================================================================
-
-#1  score=92  124.3s → 187.6s
-     title:  The one mistake that cost me $50K
-     hook:   "Nobody talks about this, but it killed my first startup..."
-     clip:   https://.../short_1.mp4
-
-#2  score=88  ...
+**Option C: Run the Original CLI**
+```bash
+# Local mode with Gemini 2.5 Flash highlight extraction
+python3 main.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+    --mode local \
+    --llm-provider gemini \
+    --num-clips 3 \
+    --aspect-ratio 9:16
 ```
 
-`--output-json result.json` produces:
+### Step 5: Run Automated Tests
+```bash
+pytest -v
+```
 
+---
+
+## 3. Environment Variables Reference
+
+| Variable | Required | Description | Example |
+|---|---|---|---|
+| `ENGINE_API_KEY` | **Yes (Prod)** | Secret API key required in `X-API-Key` or `Authorization: Bearer` header. | `sec_gta6_live_98a7bc...` |
+| `GEMINI_API_KEY` | **Yes** (if using Gemini) | Google Gemini API key for intelligent highlight ranking & social copy. | `AIzaSy...` |
+| `OPENAI_API_KEY` | Optional | OpenAI API key (used if `LLM_PROVIDER=openai`). | `sk-proj-...` |
+| `LLM_PROVIDER` | No | Default highlight ranking LLM: `gemini` or `openai` (default: `gemini`). | `gemini` |
+| `SUPABASE_URL` | **Yes (Prod)** | Your Supabase project URL. | `https://xyzproject.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Yes (Prod)** | Supabase service-role key for backend database & storage access. | `eyJhbGciOi...` |
+| `SUPABASE_STORAGE_BUCKET` | No | Supabase Storage bucket for rendered MP4 clips (default: `shorts`). | `shorts` |
+| `REDIS_URL` | **Yes (Prod)** | Redis connection string for background queue. | `redis://default:pass@redis.render.com:6379` |
+| `CORS_ORIGINS` | No | Comma-separated list of allowed frontend dashboard origins. | `http://localhost:5173,https://*.lovable.app` |
+| `MAX_VIDEO_DURATION_SECONDS`| No | Hard cutoff for input video duration (default: 7200 = 2 hours). | `7200` |
+| `MAX_CONCURRENT_JOBS` | No | Worker concurrency limit (default: `2`). | `2` |
+| `JOB_TIMEOUT_SECONDS` | No | Timeout before a stuck job is aborted (default: `1800` = 30m). | `1800` |
+| `YOUTUBE_CLIENT_ID` | Optional | Google Cloud OAuth 2.0 Client ID for YouTube Shorts upload. | `123456789.apps.googleusercontent.com` |
+| `YOUTUBE_CLIENT_SECRET` | Optional | Google Cloud OAuth 2.0 Client Secret. | `GOCSPX-...` |
+| `YOUTUBE_REDIRECT_URI` | Optional | OAuth callback redirect URL. | `https://engine.onrender.com/api/v1/auth/youtube/callback` |
+| `ENVIRONMENT` | No | `production`, `development`, or `test`. | `production` |
+| `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, or `ERROR` (default: `INFO`). | `INFO` |
+
+---
+
+## 4. Supabase Setup & SQL Migrations
+
+The engine uses Supabase for database persistence and public video asset storage.
+
+### 1. Apply Database Schema
+Execute the SQL migration located in `supabase/migrations/20261121000000_initial_schema.sql` in your **Supabase SQL Editor**:
+- Creates `jobs`, `clips`, `source_videos`, and `job_logs` tables.
+- Creates optimized indexes on `url`, `status`, `job_id`, and `created_at`.
+- Sets up Row Level Security (RLS) policies allowing secure backend read/write access.
+
+### 2. Configure Supabase Storage Bucket
+1. In the Supabase dashboard, navigate to **Storage**.
+2. Create a new bucket named **`shorts`** (or the value set in `SUPABASE_STORAGE_BUCKET`).
+3. Set bucket access to **Public** so generated clip URLs can be streamed by the Lovable dashboard.
+
+---
+
+## 5. Render Deployment Instructions
+
+The repository includes a ready-to-deploy `render.yaml` Blueprint specification defining two isolated services and a managed Redis instance.
+
+### Automatic Blueprint Deployment
+1. Log in to [Render](https://dashboard.render.com/).
+2. Click **New +** → **Blueprint**.
+3. Connect your GitHub repository `Flames-ui/gta6-shorts-engine`.
+4. Render will parse `render.yaml` and configure:
+   - **`gta6-shorts-engine`** (Web Service):
+     - Docker runtime using the repository `Dockerfile`.
+     - Command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2`
+     - Health Check Path: `/health`
+   - **`gta6-shorts-worker`** (Background Worker):
+     - Docker runtime with FFmpeg 8.x, Python 3.11, and Whisper pre-installed.
+     - Plan: `standard` (2 GB RAM, 1 CPU) or higher for video encoding.
+     - Command: `python3 -m app.worker`
+   - **`gta6-shorts-redis`** (Redis):
+     - Private networking queue for reliable job dispatching.
+5. Provide the required secrets in the Render dashboard:
+   - `ENGINE_API_KEY`
+   - `GEMINI_API_KEY`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+6. Click **Apply**.
+
+---
+
+## 6. Complete API Reference
+
+All protected endpoints require authentication via:
+`X-API-Key: <ENGINE_API_KEY>` or `Authorization: Bearer <ENGINE_API_KEY>`
+
+### 1. Health & Status
+#### `GET /health`
+Liveness and readiness probe for load balancers and Render health checks.
 ```json
 {
-  "source_video_url": "...",
-  "transcript": { "duration": 1873.4, "segments": [...] },
-  "highlights": [ {...}, {...}, ... ],
-  "shorts": [
-    {
-      "title": "...",
-      "start_time": 124.3,
-      "end_time": 187.6,
-      "score": 92,
-      "hook_sentence": "...",
-      "virality_reason": "...",
-      "clip_url": "https://.../short_1.mp4"
-    }
+  "status": "healthy",
+  "app": "GTA 6 Shorts Engine",
+  "version": "1.0.0",
+  "timestamp": "2026-11-21T12:00:00Z",
+  "redis": "connected",
+  "supabase": "connected"
+}
+```
+
+#### `GET /api/v1/status`
+Engine operational status, queue depth, and worker count.
+```json
+{
+  "status": "operational",
+  "queue_depth": 1,
+  "active_workers": 2,
+  "gemini_configured": true,
+  "supabase_configured": true,
+  "youtube_oauth_configured": false
+}
+```
+
+### 2. Job Management
+#### `POST /api/v1/jobs`
+Submit a new video processing job. Duplicate URLs with active jobs return `409 Conflict` unless `"force": true` is specified.
+```json
+// Request Body
+{
+  "url": "https://www.youtube.com/watch?v=QdBZY2fkU-0",
+  "num_clips": 3,
+  "aspect_ratio": "9:16",
+  "mode": "local",
+  "llm_provider": "gemini",
+  "gta_preset": true,
+  "force": false
+}
+
+// Response (201 Created)
+{
+  "id": "job_a1b2c3d4e5f6",
+  "url": "https://www.youtube.com/watch?v=QdBZY2fkU-0",
+  "status": "queued",
+  "stage": "pending",
+  "progress": 0,
+  "num_clips": 3,
+  "video_title": null,
+  "video_duration": null,
+  "error": null,
+  "mode": "local",
+  "llm_provider": "gemini",
+  "gta_preset": true,
+  "retry_count": 0,
+  "created_at": "2026-11-21T12:01:00Z",
+  "clips": [],
+  "logs": []
+}
+```
+
+#### `GET /api/v1/jobs/{job_id}`
+Retrieve real-time processing status, progress percentage, log events, and generated clips.
+```json
+{
+  "id": "job_a1b2c3d4e5f6",
+  "status": "processing",
+  "stage": "transcribing",
+  "progress": 35,
+  "video_title": "Grand Theft Auto VI — Official Trailer 1",
+  "video_duration": 91.0,
+  "clips": [],
+  "logs": [
+    {"timestamp": "2026-11-21T12:01:05Z", "stage": "downloading", "message": "Source video acquired"},
+    {"timestamp": "2026-11-21T12:01:25Z", "stage": "transcribing", "message": "Whisper speech-to-text complete"}
   ]
 }
 ```
 
-## Configuration
-
-### Highlight selection criteria
-Edit `shorts_generator/highlights.py`:
-- **Virality framework**: `VIRALITY_CRITERIA` — the ranked list of signals the LLM optimizes for
-- **System prompt**: `HIGHLIGHT_SYSTEM_PROMPT` — duration sweet spot, hook rules, JSON schema
-- **Chunk size**: `CHUNK_SIZE_SECONDS` (default 1200) — chunk length for long videos
-- **Long-video threshold**: `LONG_VIDEO_THRESHOLD` (default 1800) — videos longer than this are chunked
-- **Chunk overlap**: `CHUNK_OVERLAP_SECONDS` (default 60) — overlap between chunks so cross-boundary clips aren't missed
-
-### Polling / timeout
-Edit `shorts_generator/config.py` (or set env vars):
-- `MUAPI_POLL_INTERVAL` (default 5s) — seconds between job-status polls
-- `MUAPI_POLL_TIMEOUT` (default 1800s) — give up after this long
-
-### Whisper transcription
-Audio is transcribed by MuAPI's `/openai-whisper` endpoint (server-side `whisper-1`). Pass `--language <code>` to lock the recognition to a specific language; otherwise it auto-detects.
-
-## Project Structure
-
+#### `GET /api/v1/jobs`
+List jobs with pagination and status filtering.
 ```
-AI-Youtube-Shorts-Generator/
-├── main.py                       CLI entry point
-├── requirements.txt              core deps (api mode)
-├── requirements-local.txt        optional deps for --mode local
-├── .env.example
-└── shorts_generator/
-    ├── config.py                 env / settings (MuAPI + local LLM + Whisper)
-    ├── muapi.py                  generic submit + poll wrapper
-    ├── downloader.py             API mode: YouTube download via MuAPI
-    ├── transcriber.py            API mode: MuAPI /openai-whisper client
-    ├── highlights.py             shared LLM virality ranking (pluggable backend)
-    ├── clipper.py                API mode: MuAPI /autocrop
-    ├── pipeline.py               mode dispatcher (api ↔ local)
-    └── local/                    --mode local backends (offline)
-        ├── downloader.py         yt-dlp download
-        ├── transcriber.py        faster-whisper transcription
-        ├── llm.py                OpenAI or Gemini client selector
-        └── clipper.py            ffmpeg cut + OpenCV vertical crop
+GET /api/v1/jobs?limit=20&offset=0&status=completed
 ```
 
-## Troubleshooting
+#### `POST /api/v1/jobs/{job_id}/cancel`
+Cancel an active queued or processing job.
 
-### Whisper produced no segments
-The video may have no detectable speech, or it may be in a language Whisper struggles with. Try passing `--language en` (or the correct ISO-639-1 code) to skip auto-detection.
+#### `POST /api/v1/jobs/{job_id}/retry`
+Re-enqueue a failed or cancelled job.
 
-### Looking for better results?
-The [AI Clipping API](https://muapi.ai/playground/ai-clipping?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) uses an improved algorithm that produces higher-quality clips with better highlight detection.
+### 3. Generated Clips & Publishing
+#### `GET /api/v1/clips/{clip_id}`
+Retrieve a single generated Short with AI-generated titles, hooks, viral scores, and storage stream URL.
+```json
+{
+  "id": "clip_789abc",
+  "job_id": "job_a1b2c3d4e5f6",
+  "title": "GTA 6 Vice City Beach Scene Breakdown",
+  "hook_sentence": "Look closely at the water physics in this scene!",
+  "score": 94,
+  "start_time": 12.5,
+  "end_time": 42.5,
+  "duration": 30.0,
+  "storage_url": "https://xyz.supabase.co/storage/v1/object/public/shorts/clips/clip_789abc.mp4",
+  "aspect_ratio": "9:16",
+  "publishing_status": "draft",
+  "suggested_tags": ["GTA6", "GrandTheftAuto", "Shorts", "ViceCity", "Gaming"]
+}
+```
 
-## Contributing
+#### `POST /api/v1/clips/{clip_id}/approve`
+Human-in-the-loop approval endpoint. Must be called before any clip can be published.
+```json
+{
+  "approved_for_publishing": true,
+  "custom_title": "Official GTA 6 Vice City Stunts #Shorts",
+  "custom_description": "Insane GTA 6 moments captured in 4K 60FPS.",
+  "custom_hashtags": ["GTA6", "Shorts", "Gaming"]
+}
+```
 
-Contributions are welcome! Please fork the repository and submit a pull request.
+#### `POST /api/v1/clips/{clip_id}/publish`
+Uploads the approved clip to YouTube as a **private-by-default** Short. Never releases clips publicly without explicit human intervention.
 
-## License
+---
 
-This project is licensed under the MIT License.
+## 7. Lovable Dashboard Integration Guide
 
-## Related Projects
+The GTA 6 Shorts Engine is structured for seamless integration with Lovable-built frontend applications.
 
-- [awesome-vibecoded-saas](https://github.com/Anil-matcha/awesome-vibecoded-saas) — broader catalog of open-source SaaS alternatives featuring this Shorts workflow.
-- [Muapi open-source alternatives](https://muapi.ai/open-source/alternative) — compare the Shorts workflow with the paid creator tools it targets.
-- [AI Influencer Generator](https://github.com/SamurAIGPT/AI-Influencer-Generator)
-- [Text to Video AI](https://github.com/SamurAIGPT/Text-To-Video-AI)
-- [Faceless Video Generator](https://github.com/SamurAIGPT/Faceless-Video-Generator)
-- [AI B-roll Generator](https://github.com/Anil-matcha/AI-B-roll)
-- [No-code YouTube Shorts Generator](https://www.vadoo.tv/clip-youtube-video)
-- [ai-creator-academy](https://github.com/Anil-matcha/ai-creator-academy) — free curriculum teaching creators how to monetize AI-generated shorts and video content
+### Recommended UI Screens & Views:
+1. **Source Channel Monitor & Ingestion**:
+   - URL input card with immediate regex / domain feedback.
+   - Presets for clip counts (1, 3, 5) and GTA-virality tuning.
+2. **Processing Pipeline & Live Progress Bar**:
+   - Visual step indicator: `Pending` → `Downloading` → `Transcribing` → `AI Analysis` → `FFmpeg Crop` → `Uploading` → `Completed`.
+   - Polls `GET /api/v1/jobs/{job_id}` at a 3-second interval until terminal status.
+3. **Shorts Gallery & Video Player**:
+   - 9:16 vertical video player rendering `storage_url`.
+   - Card displays viral score badge (0–100), hook sentence, and suggested hashtags.
+4. **Publishing Approval Workflow**:
+   - Editable fields for Title, Description, and Tags.
+   - "Approve for Publishing" action button triggers `POST /api/v1/clips/{clip_id}/approve`.
+   - "Publish to YouTube" triggers `POST /api/v1/clips/{clip_id}/publish`.
+
+---
+
+## 8. YouTube Publishing & Compliance Architecture
+
+- **Private-by-Default Policy**: All automated publishing requests explicitly set `"privacyStatus": "private"`. No clip is ever made public automatically.
+- **Copyright & Compliance Notice**: The backend enforces modular authorized source ingestion. Utilizing automated tooling does not override YouTube's Terms of Service or third-party intellectual property rights. Users must possess appropriate rights or licenses for all processed media.
+- **OAuth Token Handling**: YouTube Data API v3 OAuth refresh tokens are stored securely in Supabase with database-level encryption and are never returned in client API responses.
+
+---
+
+## 9. Troubleshooting & Common Issues
+
+| Issue | Cause | Solution |
+|---|---|---|
+| `503 Service Unavailable` on health check | Redis connection failed | Verify `REDIS_URL` in environment variables or check private networking hostname. |
+| `401 Unauthorized` on API requests | Missing or wrong API key | Pass `X-API-Key: <ENGINE_API_KEY>` header. |
+| `400 Bad Request: URL must be an approved YouTube domain` | Input URL failed security check | Only valid HTTPS YouTube URLs (`youtube.com`, `youtu.be`) are accepted. |
+| Worker OOM (Out of Memory) crash | Render worker instance memory too low | Increase Background Worker plan to at least 2 GB RAM in `render.yaml` or Render dashboard. |
+| Gemini highlight detection error | Missing or invalid Gemini API key | Ensure `GEMINI_API_KEY` is set and has active quota. |
+| SQLite locking errors in local testing | Multiple processes accessing SQLite | Concurrency locking is handled via `threading.RLock()`. In production, configure Supabase PostgreSQL. |
+
+---
+
+## 10. License
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

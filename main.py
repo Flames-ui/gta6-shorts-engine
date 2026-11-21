@@ -1,8 +1,8 @@
-"""CLI entry point.
+"""CLI entry point for GTA 6 Shorts Generator.
 
 Usage:
     python main.py "https://www.youtube.com/watch?v=..." \
-        --num-clips 3 --aspect-ratio 9:16
+        --mode local --llm-provider gemini --num-clips 3 --aspect-ratio 9:16
 """
 import argparse
 import json
@@ -19,13 +19,19 @@ from shorts_generator import generate_shorts
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="AI YouTube Shorts Generator")
+    parser = argparse.ArgumentParser(description="GTA 6 Shorts Generator — CLI & Engine")
     parser.add_argument("url", help="YouTube URL, file:// URL, or local file path")
     parser.add_argument(
         "--mode",
         choices=["api", "local"],
-        default="api",
-        help="api (default, MuAPI) or local (remote URL, file://, or local path + faster-whisper + LLM provider + ffmpeg).",
+        default="local",
+        help="local (default, yt-dlp + faster-whisper + Gemini/OpenAI + FFmpeg) or api (legacy MuAPI).",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=["gemini", "openai"],
+        default=None,
+        help="LLM provider for highlight detection (default: from LLM_PROVIDER env, or gemini)",
     )
     parser.add_argument("--num-clips", type=int, default=3, help="How many shorts to render (default: 3)")
     parser.add_argument("--aspect-ratio", default="9:16", help="Output aspect ratio (default: 9:16)")
@@ -42,6 +48,7 @@ def main() -> int:
             download_format=args.format,
             language=args.language,
             mode=args.mode,
+            llm_provider=args.llm_provider,
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)
