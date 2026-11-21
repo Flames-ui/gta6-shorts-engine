@@ -244,3 +244,50 @@ Lovable dashboards connect to the backend using standard HTTPS requests with the
 - **Redis Offline in Development**: In development or test mode, the system safely falls back to local in-process execution for developer convenience. In production, it fails closed to protect workload integrity.
 - **Missing AI Key**: If Gemini/OpenAI API keys are not supplied, the pipeline activates heuristic highlight fallback mode to allow end-to-end rendering test execution without crashing.
 - **Clip Validation Failures**: Videos failing minimum length, audio presence, or resolution checks are logged and quarantined rather than published.
+
+---
+
+## 13. Production Readiness & External Credentials Checklist
+
+The engine is engineered to run in a fully verified, fail-closed posture in production (`ENVIRONMENT=production` and `FAIL_CLOSED_IN_PRODUCTION=true`). Below is an explicit operational status matrix:
+
+| Component | Implemented Functionality | External Credential Requirement |
+| :--- | :--- | :--- |
+| **Authentication & RBAC** | Cryptographic Supabase JWT (HS256) signature verification, claim & expiry validation, constant-time API key comparisons, strict tenant isolation & non-admin fail-closed checks. | `SUPABASE_JWT_SECRET` and `ENGINE_API_KEY`. |
+| **Database & Persistence** | Supabase PostgreSQL client with full CRUD for jobs, clips, sources, permissions, discovered content, and OAuth states. Row Level Security policies enabled with `security_invoker = true` on compatibility views. | `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (mandatory in production; SQLite permitted only in local/test). |
+| **Queue & Background Worker** | Redis RQ task queue with retry backoff, connection state checks, sanitized logging, and zero-worker reporting when offline. | `REDIS_URL` (mandatory in production; thread-fallback blocked). |
+| **Content Discovery & Rights** | Source registration, database-persisted rights permissions, pre-production and pre-publishing copyright gates. | Public RSS feeds operate immediately; partner feeds require platform/API approval. |
+| **AI Highlight Analysis** | Gemini 2.5 Flash and OpenAI GPT-4o-mini client integration with structured schema parsing. | `GEMINI_API_KEY` or `OPENAI_API_KEY` (heuristic fallback active in dev/test when absent). |
+| **Video Production Engine** | Video downloading, Whisper audio transcription, dynamic vertical 9:16 cropping, visual hook overlay, and duration validation. | FFmpeg 6+ / 7+ system binary and local/container compute. |
+| **Social Publishing (Buffer)** | Cryptographically random OAuth state generation, single-use state validation, external callback handling without API keys, platform-specific constraints validation, and scheduling queue. | Requires `BUFFER_CLIENT_ID`, `BUFFER_CLIENT_SECRET`, and `BUFFER_REDIRECT_URI` registered in Buffer Developer Portal. |
+| **Social Publishing (Direct YouTube)** | OAuth 2.0 direct publishing fallback. | Requires `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` with YouTube Data API v3 scope approval from Google Cloud Console. |
+| **Health & Observability** | `/health` (general status), `/health/ready` (Kubernetes/Render readiness probe, returns 503 if Supabase or Redis are unavailable in production), `/health/live` (liveness probe). | None. |
+
+---
+
+## 14. Step-by-Step Supabase Migration Instructions
+
+1. Log into your [Supabase Dashboard](https://supabase.com/dashboard).
+2. Open your project and navigate to the **SQL Editor**.
+3. Copy and execute the contents of `supabase/migrations/20261121010000_multi_category_and_security.sql`.
+4. Ensure the `shorts` storage bucket exists under **Storage** > **Buckets**, or create a bucket named `shorts` with appropriate read permissions for signed clip streaming.
+5. In **Project Settings** > **API**, retrieve your:
+   - Project URL (`SUPABASE_URL`)
+   - `service_role` secret key (`SUPABASE_SERVICE_ROLE_KEY`)
+   - JWT Secret (`SUPABASE_JWT_SECRET`)
+6. Populate these values in your Render environment variables or `.env`.
+
+---
+
+## 15. Step-by-Step Buffer Connection Instructions
+
+1. Register an application in the [Buffer Developer Portal](https://buffer.com/developers/api).
+2. Set your **Redirect URI** to:
+   `https://<YOUR_RENDER_SERVICE_URL>/api/v1/publishing/buffer/callback`
+3. Copy your `Client ID` and `Client Secret` into `BUFFER_CLIENT_ID` and `BUFFER_CLIENT_SECRET`.
+4. From your Lovable frontend or API client:
+   - Call `GET /api/v1/publishing/buffer/connect`.
+   - The endpoint generates a cryptographically random, persistent OAuth state and returns the Buffer authorization URL.
+   - Redirect your browser to the authorization URL.
+   - Buffer redirects back to `/api/v1/publishing/buffer/callback?code=...&state=...`.
+   - The engine validates and consumes the OAuth state (single-use), exchanges the authorization code for an access token, retrieves connected channels/profiles, and saves them in `publishing_accounts` and `connected_channels`.

@@ -45,6 +45,17 @@ def process_video_job(job_id: str):
         db.update_job_progress(job_id, stage="downloading", progress=10, status="processing")
         db.add_log(job_id, "downloading", f"Acquiring video source for category '{category_id}': {job['url']}")
 
+        # Check source rights if linked
+        source_id = job.get("source_id")
+        if source_id:
+            from .discovery.rights_manager import rights_manager
+            allowed, msg = rights_manager.check_rights_for_production(source_id)
+            if not allowed:
+                db.update_job_progress(job_id, stage="rights_check", status="failed", error=f"Rights check failed: {msg}")
+                db.add_log(job_id, "rights_check", f"Blocked by content rights check: {msg}")
+                return
+
+
         raw_url = job["url"].strip()
         source_video_path = None
         video_title = "Source Video"
@@ -190,6 +201,7 @@ def process_video_job(job_id: str):
                 "job_id": job_id,
                 "user_id": user_id,
                 "category_id": category_id,
+                "source_id": source_id,
                 "title": social_data.get("title") or c_title,
                 "hook_sentence": social_data.get("hook") or c_hook,
                 "virality_reason": c_reason,

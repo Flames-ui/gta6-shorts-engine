@@ -39,18 +39,21 @@ async def create_job(
             detail=f"Category '{payload.category_id}' is not recognized.",
         )
 
-    # Duplicate check
-    active = db.find_active_job_by_url(payload.url)
-    if active:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"An active processing job already exists for this source (Job ID: {active['id']}).",
-        )
+    # Duplicate check unless force is requested
+    if not payload.force:
+        active = db.find_active_job_by_url(payload.url)
+        if active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"An active processing job already exists for this source (Job ID: {active['id']}).",
+            )
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
+    user_id = None if auth.user_id == "system_admin" else auth.user_id
+
     job_record = {
         "id": job_id,
-        "user_id": auth.user_id if auth.user_id != "system_admin" else None,
+        "user_id": user_id,
         "url": payload.url,
         "category_id": payload.category_id,
         "status": JobStatus.QUEUED.value,
@@ -118,7 +121,7 @@ async def retry_job(
     job_id: str,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Retry a failed or cancelled job."""
+    """Retry a failed or cancelled job with ownership check."""
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
@@ -148,7 +151,7 @@ async def cancel_job(
     job_id: str,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Cancel an active or queued job."""
+    """Cancel an active or queued job with ownership check."""
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")

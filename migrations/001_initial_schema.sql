@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS public.processing_jobs (
 );
 
 -- Create backward-compatible view for 'jobs' table
-CREATE OR REPLACE VIEW public.jobs AS SELECT * FROM public.processing_jobs;
+CREATE OR REPLACE VIEW public.jobs WITH (security_invoker = true) AS SELECT * FROM public.processing_jobs;
 
 CREATE TABLE IF NOT EXISTS public.processing_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS public.processing_logs (
 );
 
 -- Backward-compatible view for 'job_logs'
-CREATE OR REPLACE VIEW public.job_logs AS SELECT * FROM public.processing_logs;
+CREATE OR REPLACE VIEW public.job_logs WITH (security_invoker = true) AS SELECT * FROM public.processing_logs;
 
 -- -----------------------------------------------------------------------------
 -- 6. Generated Clips & Metadata
@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS public.generated_clips (
 );
 
 -- Backward-compatible view for 'clips'
-CREATE OR REPLACE VIEW public.clips AS SELECT * FROM public.generated_clips;
+CREATE OR REPLACE VIEW public.clips WITH (security_invoker = true) AS SELECT * FROM public.generated_clips;
 
 CREATE TABLE IF NOT EXISTS public.clip_metadata (
     clip_id TEXT PRIMARY KEY REFERENCES public.generated_clips(id) ON DELETE CASCADE,
@@ -198,6 +198,27 @@ CREATE TABLE IF NOT EXISTS public.connected_channels (
 );
 
 -- -----------------------------------------------------------------------------
+
+-- -----------------------------------------------------------------------------
+-- 7b. Secure OAuth Authorization States
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.oauth_states (
+    state TEXT PRIMARY KEY,
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    service TEXT NOT NULL,
+    redirect_uri TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_states_state ON public.oauth_states(state);
+CREATE INDEX IF NOT EXISTS idx_oauth_states_expires ON public.oauth_states(expires_at);
+
+ALTER TABLE public.oauth_states ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access on oauth_states" ON public.oauth_states FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY "Users can view own oauth states" ON public.oauth_states FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
 -- 8. Publishing Queue & History
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.publishing_queue (

@@ -1,6 +1,7 @@
 """Dedicated Background Worker entrypoint for Render and production deployment."""
 import logging
 import os
+import re
 import signal
 import sys
 import redis
@@ -15,9 +16,21 @@ logging.basicConfig(
 logger = logging.getLogger("gta6_shorts.worker")
 
 
+def sanitize_url(url: str) -> str:
+    """Mask credentials in connection strings."""
+    if not url:
+        return ""
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", url)
+
+
 def run_worker():
+    clean_url = sanitize_url(settings.REDIS_URL)
     logger.info("Initializing %s Background Worker", settings.APP_NAME)
-    logger.info("Connecting to Redis queue at %s", settings.REDIS_URL)
+    logger.info("Connecting to Redis queue at %s", clean_url)
+
+    if not settings.REDIS_URL:
+        logger.critical("REDIS_URL is not set. Worker cannot start.")
+        sys.exit(1)
 
     try:
         redis_conn = redis.from_url(
@@ -28,7 +41,7 @@ def run_worker():
         redis_conn.ping()
         logger.info("Redis connection established successfully.")
     except Exception as e:
-        logger.critical("Failed to connect to Redis queue at %s: %s", settings.REDIS_URL, e)
+        logger.critical("Failed to connect to Redis queue at %s: %s", clean_url, e)
         sys.exit(1)
 
     queue_name = getattr(settings, "QUEUE_NAME", "viral-shorts")

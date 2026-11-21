@@ -5,10 +5,9 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .api.v1.endpoints import health
 from .api.v1.router import api_v1_router
 from .config import settings
-from .queue import job_queue
-from .services.supabase_client import db
 
 # Configure structured logging
 logging.basicConfig(
@@ -36,7 +35,7 @@ app = FastAPI(
 )
 
 # -----------------------------------------------------------------------------
-# Security Middleware: Request Size Limits & Headers
+# Security Middleware: Request Size Limits & Defensive Headers
 # -----------------------------------------------------------------------------
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
@@ -74,39 +73,8 @@ app.add_middleware(
     max_age=600,
 )
 
-
 # -----------------------------------------------------------------------------
-# Root & Health Check Endpoints (For Render & Monitoring)
+# Mount Routers
 # -----------------------------------------------------------------------------
-@app.get("/", tags=["System"])
-async def root():
-    """Service metadata and status summary."""
-    return {
-        "service": "GTA 6 Shorts Engine & Viral Video Pipeline",
-        "version": settings.APP_VERSION,
-        "environment": settings.ENVIRONMENT,
-        "status": "online",
-        "endpoints": {
-            "health": "/health",
-            "docs": "/docs",
-            "api_v1": "/api/v1",
-        },
-    }
-
-
-@app.get("/health", tags=["System"])
-async def health():
-    """Health check endpoint used by Render and container orchestrators."""
-    return {
-        "status": "healthy",
-        "service": "GTA 6 Shorts Engine",
-        "version": settings.APP_VERSION,
-        "redis": "connected" if job_queue.has_redis else "offline",
-        "supabase": "connected" if db.has_supabase else "local_sqlite",
-    }
-
-
-# -----------------------------------------------------------------------------
-# Mount API v1 Master Router
-# -----------------------------------------------------------------------------
+app.include_router(health.router)
 app.include_router(api_v1_router)

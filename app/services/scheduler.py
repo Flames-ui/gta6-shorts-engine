@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from ..config import settings
+from .supabase_client import db
 
 logger = logging.getLogger("gta6_shorts.scheduler")
 
@@ -44,10 +45,14 @@ class ScheduleManager:
             daily_target_min=settings.DAILY_TARGET_MIN,
             daily_target_max=settings.DAILY_TARGET_MAX,
         )
-        # Tracks (date_str, channel_id, clip_id) to prevent duplicate publishing
+        # Tracks channel_id:clip_id to prevent duplicate publishing
         self._published_registry: Dict[str, datetime] = {}
         # Daily counts: date_str -> int
         self._daily_counts: Dict[str, int] = {}
+        # Category daily counts: date_str -> {category: count}
+        self._category_daily_counts: Dict[str, Dict[str, int]] = {}
+        # Platform daily counts: date_str -> {platform: count}
+        self._platform_daily_counts: Dict[str, Dict[str, int]] = {}
 
     def get_config(self) -> ProductionScheduleConfig:
         return self.config
@@ -64,6 +69,7 @@ class ScheduleManager:
         channel_id: str,
         category: str,
         override_quota: bool = False,
+        platform: str = "tiktok",
     ) -> Tuple[bool, str]:
         """Verify whether a clip can be scheduled according to quotas, pause state, and duplicate checks."""
         if self.config.is_paused and not override_quota:
@@ -79,13 +85,54 @@ class ScheduleManager:
         if current_daily_count >= self.config.daily_target_max and not override_quota:
             return False, f"Daily production ceiling reached ({current_daily_count}/{self.config.daily_target_max} videos for {today_str})."
 
+        # Check category-specific target if distribution specified
+        cat_dist = self.config.category_distribution.get(category)
+        if cat_dist is not None and not override_quota:
+            cat_target = int(self.config.daily_target_max * cat_dist) + 1
+            cat_count = self._category_daily_counts.get(today_str, {}).get(category, 0)
+            if cat_count >= cat_target:
+                return False, f"Category '{category}' daily target reached ({cat_count}/{cat_target} for {today_str})."
+
         return True, "Eligible for scheduling."
 
-    def record_scheduled_clip(self, clip_id: str, channel_id: str):
+    def record_scheduled_clip(
+        self,
+        clip_id: str,
+        channel_id: str,
+        category: Optional[str] = None,
+        platform: Optional[str] = None,
+    ):
         """Register that a clip has been dispatched or scheduled to prevent duplicate runs."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._published_registry[f"{channel_id}:{clip_id}"] = datetime.now(timezone.utc)
         self._daily_counts[today_str] = self._daily_counts.get(today_str, 0) + 1
+
+        if category:
+            if today_str not in self._category_daily_counts:
+                self._category_daily_counts[today_str] = {}
+            self._category_daily_counts[today_str][category] = (
+                self._category_daily_counts[today_str].get(category, 0) + 1
+            )
+
+        if platform:
+            if today_str not in self._platform_daily_counts:
+                self._platform_daily_counts[today_str] = {}
+            self._platform_daily_counts[today_str][platform] = (
+                self._platform_daily_counts[today_str].get(platform, 0) + 1
+            )
+
+    def get_daily_usage(self, date_str: Optional[str] = None) -> Dict[str, Any]:
+        """Report daily usage metrics against target quotas."""
+        d = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return {
+            "date": d,
+            "total_scheduled": self._daily_counts.get(d, 0),
+            "target_min": self.config.daily_target_min,
+            "target_max": self.config.daily_target_max,
+            "is_paused": self.config.is_paused,
+            "category_counts": self._category_daily_counts.get(d, {}),
+            "platform_counts": self._platform_daily_counts.get(d, {}),
+        }
 
 
 schedule_manager = ScheduleManager()

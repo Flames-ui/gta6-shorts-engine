@@ -1,6 +1,6 @@
 """Engine status and capabilities endpoint."""
 from fastapi import APIRouter, Depends
-from ....auth import verify_api_key
+from ....auth import AuthContext, verify_api_key
 from ....config import settings
 from ....queue import queue_manager
 from ....schemas import StatusResponse
@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 @router.get("/status", response_model=StatusResponse, tags=["Engine Status"])
-async def get_engine_status(token: str = Depends(verify_api_key)):
+async def get_engine_status(auth: AuthContext = Depends(verify_api_key)):
     """Retrieve detailed engine metrics, worker count, and capabilities."""
     queue_stats = queue_manager.get_stats()
 
@@ -44,7 +44,7 @@ async def get_engine_status(token: str = Depends(verify_api_key)):
         queued_jobs=queued_jobs,
         completed_jobs=completed_jobs,
         failed_jobs=failed_jobs,
-        workers_online=queue_stats.get("workers_online", 1),
+        workers_online=queue_stats.get("workers_online", 0),
         supported_modes=["local", "api"],
         default_llm_provider=settings.LLM_PROVIDER,
         storage_provider=storage_provider,

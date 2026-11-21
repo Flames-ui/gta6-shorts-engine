@@ -313,3 +313,12 @@ class StatusResponse(BaseModel):
     default_llm_provider: str = "gemini"
     storage_provider: str = "supabase_storage"
     youtube_oauth_configured: bool = False
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    environment: str
+    timestamp: str
+    redis: str
+    supabase: str

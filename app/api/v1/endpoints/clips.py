@@ -12,6 +12,7 @@ from ....schemas import (
     PublishingStatus,
 )
 from ....services.buffer_publisher import buffer_publisher
+from ....services.discovery.rights_manager import rights_manager
 from ....services.scheduler import schedule_manager
 from ....services.supabase_client import db
 
@@ -39,8 +40,9 @@ async def list_clips(
     category_id: Optional[str] = Query(None, description="Filter clips by category"),
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """List generated clips with pagination and optional category filtering."""
-    items, _ = db.list_clips(limit=limit, offset=offset, category_id=category_id)
+    """List generated clips with pagination, tenant filtering, and optional category filtering."""
+    user_id = None if auth.is_admin else auth.user_id
+    items, _ = db.list_clips(limit=limit, offset=offset, category_id=category_id, user_id=user_id)
     return items
 
 
@@ -84,7 +86,7 @@ async def publish_clip(
 ):
     """
     Publish an approved clip directly (via configured YouTube OAuth or Buffer).
-    Enforces that the clip must be reviewed and approved first.
+    Enforces review approval and content rights verification before publishing.
     """
     clip = db.get_clip(clip_id)
     if not clip:
@@ -97,6 +99,16 @@ async def publish_clip(
             detail="Clip must be approved before publishing. Review and approve the clip first.",
         )
 
+    # Check source rights if linked
+    source_id = clip.get("source_id")
+    if source_id:
+        allowed, reason = rights_manager.check_rights_for_production(source_id, target_platform="youtube_shorts")
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Content rights check failed: {reason}",
+            )
+
     # Check YouTube credentials if configured
     if not settings.YOUTUBE_CLIENT_ID or not settings.YOUTUBE_CLIENT_SECRET:
         raise HTTPException(
@@ -104,6 +116,7 @@ async def publish_clip(
             detail="YouTube Data API OAuth is not configured on this engine. Use Buffer publishing via /api/v1/clips/{clip_id}/schedule or configure YouTube credentials.",
         )
 
+    # In production, dispatch actual publishing job
     return {
         "status": "publishing_initiated",
         "clip_id": clip_id,
@@ -117,7 +130,7 @@ async def schedule_clip_publishing(
     payload: ClipScheduleRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Schedule an approved clip for publication via Buffer, verifying daily quotas and duplicate rules."""
+    """Schedule an approved clip for publication via Buffer, verifying rights, quotas and duplicate rules."""
     clip = db.get_clip(clip_id)
     if not clip:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Clip {clip_id} not found")
@@ -128,6 +141,16 @@ async def schedule_clip_publishing(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Clip cannot be scheduled in current status: {clip.get('publishing_status')}",
         )
+
+    # Verify rights if linked to a source
+    source_id = clip.get("source_id")
+    if source_id:
+        allowed, reason = rights_manager.check_rights_for_production(source_id, target_platform="tiktok")
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Content rights check failed: {reason}",
+            )
 
     category_id = clip.get("category_id", "gaming")
     can_schedule, reason = schedule_manager.check_scheduling_eligibility(
@@ -157,6 +180,22 @@ async def schedule_clip_publishing(
 
     schedule_manager.record_scheduled_clip(clip_id, payload.channel_id)
     db.update_clip(clip_id, {"publishing_status": PublishingStatus.SCHEDULED.value})
+
+    # Persist in publishing queue table
+    queue_item_id = f"pubq_{clip_id}_{payload.channel_id}"
+    try:
+        db.create_publishing_queue_item({
+            "id": queue_item_id,
+            "clip_id": clip_id,
+            "channel_id": payload.channel_id,
+            "user_id": auth.user_id,
+            "platform": "buffer",
+            "scheduled_for": scheduled_iso,
+            "status": "scheduled",
+            "platform_update_id": buffer_res.get("update_id"),
+        })
+    except Exception as e:
+        logger.warning("Could not persist publishing queue record: %s", e)
 
     return {
         "status": "scheduled",

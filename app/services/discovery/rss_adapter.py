@@ -41,6 +41,9 @@ class RSSSourceAdapter(BaseSourceAdapter):
             channel_title = channel.findtext("title") or "Unknown RSS Creator"
 
             entries = channel.findall("item") or root.findall("{http://www.w3.org/2005/Atom}entry")
+            # Default to PENDING_VERIFICATION for safety: never assume public media has reuse rights
+            default_status = source_config.get("default_rights_status", RightsStatus.PENDING_VERIFICATION.value)
+
             for entry in entries[:limit]:
                 title = entry.findtext("title") or "Untitled Episode"
                 link = entry.findtext("link")
@@ -60,7 +63,7 @@ class RSSSourceAdapter(BaseSourceAdapter):
                     media_url=media_url,
                     creator_name=channel_title,
                     category=source_config.get("category", "gaming"),
-                    rights_status=RightsStatus(source_config.get("default_rights_status", RightsStatus.AUTHORIZED_EDITING.value)),
+                    rights_status=RightsStatus(default_status),
                     attribution_text=f"Source: {channel_title} ({link or safe_feed_url})",
                 )
                 items.append(item)

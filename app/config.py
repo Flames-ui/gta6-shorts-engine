@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Service Information
-    APP_NAME: str = "GTA 6 & Viral Shorts Engine"
+    APP_NAME: str = "GTA 6 Shorts Engine & Multi-Category Pipeline"
     APP_VERSION: str = "2.0.0"
     ENVIRONMENT: str = Field(default="production", description="Environment: development, test, production")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level: DEBUG, INFO, WARNING, ERROR")
