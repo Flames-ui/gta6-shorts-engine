@@ -26,13 +26,47 @@ class RightsManager:
         notes: Optional[str] = None,
         verified_by: Optional[str] = None,
         attribution_requirements: Optional[str] = None,
+        original_creator: Optional[str] = None,
+        source_url: Optional[str] = None,
+        permission_evidence: Optional[str] = None,
+        derivative_rights_allowed: bool = True,
+        revoked_at: Optional[datetime] = None,
     ):
-        """Record verified permission for a content source and persist to database."""
+        """
+        Record verified permission for a content source and persist to database.
+        FAIL-CLOSED: If database persistence fails, authorization is rejected and not cached.
+        """
         status_val = status.value if isinstance(status, RightsStatus) else str(status)
         platforms = allowed_platforms or ["tiktok", "youtube_shorts"]
         expires_str = expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at
+        revoked_str = revoked_at.isoformat() if isinstance(revoked_at, datetime) else revoked_at
 
-        # Update in-memory cache
+        record_data = {
+            "id": f"perm_{source_id}",
+            "source_id": source_id,
+            "rights_status": status_val,
+            "license_type": license_type,
+            "allowed_platforms": platforms,
+            "expires_at": expires_str,
+            "verification_notes": notes,
+            "verified_by": verified_by,
+            "attribution_requirements": attribution_requirements,
+            "original_creator": original_creator,
+            "source_url": source_url,
+            "permission_evidence": permission_evidence,
+            "derivative_rights_allowed": derivative_rights_allowed,
+            "revoked_at": revoked_str,
+        }
+
+        # Persist to database first (Fail-Closed)
+        try:
+            db.set_source_permission(source_id, record_data)
+        except Exception as exc:
+            logger.critical("Database failure while saving rights permission for source %s: %s", source_id, exc)
+            self._source_permissions.pop(source_id, None)
+            raise RuntimeError(f"Database failure saving rights permission for source '{source_id}'. Authorization blocked.") from exc
+
+        # Update in-memory cache only after successful persistence
         self._source_permissions[source_id] = {
             "rights_status": status if isinstance(status, RightsStatus) else RightsStatus(status_val),
             "allowed_platforms": platforms,
@@ -41,25 +75,27 @@ class RightsManager:
             "notes": notes,
             "verified_by": verified_by,
             "attribution_requirements": attribution_requirements,
+            "original_creator": original_creator,
+            "source_url": source_url,
+            "permission_evidence": permission_evidence,
+            "derivative_rights_allowed": derivative_rights_allowed,
+            "revoked_at": revoked_at,
             "updated_at": datetime.now(timezone.utc),
         }
+        logger.info("Persisted verified rights for source %s: %s", source_id, status_val)
 
-        # Persist to database
-        try:
-            db.set_source_permission(source_id, {
-                "id": f"perm_{source_id}",
-                "source_id": source_id,
-                "rights_status": status_val,
-                "license_type": license_type,
-                "allowed_platforms": platforms,
-                "expires_at": expires_str,
-                "verification_notes": notes,
-                "verified_by": verified_by,
-                "attribution_requirements": attribution_requirements,
-            })
-            logger.info("Persisted rights permission for source %s: %s", source_id, status_val)
-        except Exception as e:
-            logger.error("Failed to persist rights permission for source %s: %s", source_id, e)
+    def revoke_permission(self, source_id: str, reason: str = "Revoked by administrator", verified_by: Optional[str] = None):
+        """Immediately revoke content reuse permission for a source (takes effect instantly)."""
+        now = datetime.now(timezone.utc)
+        self.set_permission(
+            source_id=source_id,
+            status=RightsStatus.REJECTED,
+            notes=reason,
+            verified_by=verified_by,
+            derivative_rights_allowed=False,
+            revoked_at=now,
+        )
+        logger.warning("Rights revoked immediately for source %s: %s", source_id, reason)
 
     def get_permission(self, source_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve permission from cache or persistent database."""
@@ -105,9 +141,15 @@ class RightsManager:
         if not perm:
             return False, f"No rights permission record found for source '{source_id}'."
 
+        if perm.get("revoked_at"):
+            return False, f"Content reuse authorization was revoked on {perm['revoked_at']}."
+
+        if not perm.get("derivative_rights_allowed", True):
+            return False, "Derivative editing rights are not authorized for this source."
+
         status = perm["rights_status"]
         if status == RightsStatus.REJECTED:
-            return False, "Content reuse authorization was explicitly rejected."
+            return False, "Content reuse authorization was explicitly rejected or revoked."
 
         if status == RightsStatus.PENDING_VERIFICATION:
             return False, "Content is pending verification. Cannot process without confirmed authorization."

@@ -1,3 +1,5 @@
+import uuid
+from .security import encrypt_secret, decrypt_secret
 """Supabase database persistence service with multi-category support and fail-closed production safety."""
 import json
 import logging
@@ -90,6 +92,11 @@ class DatabaseClient:
                     category_id TEXT,
                     is_active INTEGER DEFAULT 1,
                     auto_clip_enabled INTEGER DEFAULT 0,
+                    last_polled_at TEXT,
+                    last_success_at TEXT,
+                    last_error TEXT,
+                    consecutive_failures INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
                     created_at TEXT
                 );
 
@@ -103,6 +110,11 @@ class DatabaseClient:
                     attribution_requirements TEXT,
                     verification_notes TEXT,
                     verified_by TEXT,
+                    original_creator TEXT,
+                    source_url TEXT,
+                    permission_evidence TEXT,
+                    derivative_rights_allowed INTEGER DEFAULT 1,
+                    revoked_at TEXT,
                     created_at TEXT,
                     updated_at TEXT
                 );
@@ -263,6 +275,17 @@ class DatabaseClient:
                     category_distribution TEXT,
                     publishing_windows TEXT,
                     updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT,
+                    details TEXT,
+                    ip_address TEXT,
+                    created_at TEXT
                 );
             """)
 
@@ -669,8 +692,9 @@ class DatabaseClient:
                 """
                 INSERT OR REPLACE INTO source_permissions
                 (id, source_id, rights_status, license_type, allowed_platforms, expires_at,
-                 attribution_requirements, verification_notes, verified_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 attribution_requirements, verification_notes, verified_by, original_creator,
+                 source_url, permission_evidence, derivative_rights_allowed, revoked_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     permission_data.get("id", f"perm_{source_id}"),
@@ -682,6 +706,11 @@ class DatabaseClient:
                     permission_data.get("attribution_requirements"),
                     permission_data.get("verification_notes"),
                     permission_data.get("verified_by"),
+                    permission_data.get("original_creator"),
+                    permission_data.get("source_url"),
+                    permission_data.get("permission_evidence"),
+                    1 if permission_data.get("derivative_rights_allowed", True) else 0,
+                    permission_data.get("revoked_at"),
                     permission_data.get("created_at", now_iso),
                     now_iso,
                 ),
@@ -856,6 +885,10 @@ class DatabaseClient:
     # -------------------------------------------------------------------------
     def save_publishing_account(self, account_data: Dict[str, Any]) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
+        if "access_token" in account_data and account_data["access_token"]:
+            account_data["access_token_encrypted"] = encrypt_secret(account_data["access_token"])
+        if "refresh_token" in account_data and account_data["refresh_token"]:
+            account_data["refresh_token_encrypted"] = encrypt_secret(account_data["refresh_token"])
         account_data["created_at"] = account_data.get("created_at") or now_iso
         account_data["updated_at"] = now_iso
 
@@ -886,17 +919,25 @@ class DatabaseClient:
         return account_data
 
     def get_publishing_account_for_user(self, user_id: str, service: str) -> Optional[Dict[str, Any]]:
+        acc = None
         if self.has_supabase:
             res = self.client.table("publishing_accounts").select("*").eq("user_id", user_id).eq("service", service).eq("is_active", True).limit(1).execute()
-            return res.data[0] if res.data else None
+            acc = res.data[0] if res.data else None
+        else:
+            with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM publishing_accounts WHERE user_id = ? AND service = ? AND is_active = 1 LIMIT 1",
+                    (user_id, service),
+                ).fetchone()
+                acc = dict(row) if row else None
 
-        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM publishing_accounts WHERE user_id = ? AND service = ? AND is_active = 1 LIMIT 1",
-                (user_id, service),
-            ).fetchone()
-            return dict(row) if row else None
+        if acc:
+            if acc.get("access_token_encrypted"):
+                acc["access_token"] = decrypt_secret(acc["access_token_encrypted"])
+            if acc.get("refresh_token_encrypted"):
+                acc["refresh_token"] = decrypt_secret(acc["refresh_token_encrypted"])
+        return acc
 
     # -------------------------------------------------------------------------
     # Publishing Queue CRUD
@@ -1061,11 +1102,37 @@ class DatabaseClient:
             platform_counts[p] = platform_counts.get(p, 0) + (r.get("views", 0) or 0)
         top_platform = max(platform_counts, key=platform_counts.get) if platform_counts else "tiktok"
 
+        # Category breakdown
+        cat_stats: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            cid = r.get("clip_id")
+            clip = self.get_clip(cid) if cid else None
+            cat_id = (clip.get("category_id") if clip else None) or "gaming"
+            if cat_id not in cat_stats:
+                cat_stats[cat_id] = {"category_id": cat_id, "total_views": 0, "rates": [], "count": 0}
+            cat_stats[cat_id]["total_views"] += (r.get("views", 0) or 0)
+            cat_stats[cat_id]["count"] += 1
+            if r.get("engagement_rate") is not None:
+                cat_stats[cat_id]["rates"].append(float(r["engagement_rate"]))
+
+        cat_breakdown = []
+        for cat_id, s in cat_stats.items():
+            avg_eng = round(sum(s["rates"]) / len(s["rates"]), 2) if s["rates"] else 0.0
+            cat_breakdown.append({
+                "category_id": cat_id,
+                "total_views": s["total_views"],
+                "total_clips": s["count"],
+                "avg_engagement_rate": avg_eng,
+            })
+
         return {
             "total_published_clips": total_clips,
+            "total_clips_analyzed": total_clips,
+            "total_views": total_views,
             "aggregate_views": total_views,
             "average_engagement_rate": avg_rate,
             "top_performing_platform": top_platform,
+            "category_breakdown": cat_breakdown,
         }
 
     # -------------------------------------------------------------------------
@@ -1109,4 +1176,246 @@ class DatabaseClient:
         return channel_data
 
 
+
+    # -------------------------------------------------------------------------
+    # Audit Logs
+    # -------------------------------------------------------------------------
+    def create_audit_log(
+        self,
+        action: str,
+        resource_type: str,
+        user_id: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+        ip_address: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        log_id = str(uuid.uuid4())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "id": log_id,
+            "user_id": user_id,
+            "action": action,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "details": details or {},
+            "ip_address": ip_address,
+            "created_at": now_iso,
+        }
+
+        if self.has_supabase:
+            try:
+                self.client.table("audit_logs").insert(entry).execute()
+            except Exception as exc:
+                logger.error("Failed to persist audit log to Supabase: %s", exc)
+            return entry
+
+        try:
+            with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details, ip_address, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (log_id, user_id, action, resource_type, resource_id, json.dumps(details or {}), ip_address, now_iso),
+                )
+        except Exception as exc:
+            logger.error("Failed to persist audit log to SQLite: %s", exc)
+        return entry
+
+    def list_audit_logs(
+        self,
+        user_id: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            query = self.client.table("audit_logs").select("*")
+            if user_id:
+                query = query.eq("user_id", user_id)
+            if action:
+                query = query.eq("action", action)
+            res = query.order("created_at", desc=True).limit(limit).execute()
+            return res.data or []
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conds = []
+            params = []
+            if user_id:
+                conds.append("user_id = ?")
+                params.append(user_id)
+            if action:
+                conds.append("action = ?")
+                params.append(action)
+            where = f"WHERE {' AND '.join(conds)}" if conds else ""
+            rows = conn.execute(f"SELECT * FROM audit_logs {where} ORDER BY created_at DESC LIMIT ?", params + [limit]).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                if isinstance(d.get("details"), str):
+                    try:
+                        d["details"] = json.loads(d["details"])
+                    except Exception:
+                        pass
+                out.append(d)
+            return out
+
+    # -------------------------------------------------------------------------
+    # Content Source Health Tracking
+    # -------------------------------------------------------------------------
+    def update_source_health(
+        self,
+        source_id: str,
+        status: Optional[str] = None,
+        error: Optional[str] = None,
+        last_polled_at: Optional[str] = None,
+        last_success_at: Optional[str] = None,
+        increment_failures: bool = False,
+        reset_failures: bool = False,
+    ) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        polled_at = last_polled_at or now_iso
+        updates: Dict[str, Any] = {"last_polled_at": polled_at}
+        if status:
+            updates["status"] = status
+        if error is not None:
+            updates["last_error"] = error
+        if last_success_at:
+            updates["last_success_at"] = last_success_at
+
+        if self.has_supabase:
+            try:
+                self.client.table("content_sources").update(updates).eq("id", source_id).execute()
+            except Exception as exc:
+                logger.warning("Failed to update source health in Supabase: %s", exc)
+            return
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            cols = []
+            vals = []
+            for k, v in updates.items():
+                cols.append(f"{k} = ?")
+                vals.append(v)
+            if increment_failures:
+                cols.append("consecutive_failures = COALESCE(consecutive_failures, 0) + 1")
+            elif reset_failures:
+                cols.append("consecutive_failures = 0")
+            if cols:
+                vals.append(source_id)
+                conn.execute(f"UPDATE content_sources SET {', '.join(cols)} WHERE id = ?", vals)
+
+    # -------------------------------------------------------------------------
+    # Multi-Category Database Persistence
+    # -------------------------------------------------------------------------
+    def list_categories(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            query = self.client.table("categories").select("*")
+            if active_only:
+                query = query.eq("is_active", True)
+            res = query.order("name").execute()
+            return res.data or []
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            where = "WHERE is_active = 1" if active_only else ""
+            rows = conn.execute(f"SELECT * FROM categories {where} ORDER BY name").fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["is_active"] = bool(d.get("is_active", 1))
+                for json_col in ("scoring_weights", "default_hashtags", "presets", "publishing_preferences"):
+                    if isinstance(d.get(json_col), str):
+                        try:
+                            d[json_col] = json.loads(d[json_col])
+                        except Exception:
+                            pass
+                out.append(d)
+            return out
+
+    def get_category(self, category_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table("categories").select("*").eq("id", category_id).limit(1).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM categories WHERE id = ? LIMIT 1", (category_id,)).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["is_active"] = bool(d.get("is_active", 1))
+            for json_col in ("scoring_weights", "default_hashtags", "presets", "publishing_preferences"):
+                if isinstance(d.get(json_col), str):
+                    try:
+                        d[json_col] = json.loads(d[json_col])
+                    except Exception:
+                        pass
+            return d
+
+    def save_category(self, category_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        category_data.setdefault("created_at", now_iso)
+        cat_id = category_data["id"]
+
+        if self.has_supabase:
+            self.client.table("categories").upsert(category_data, on_conflict="id").execute()
+            return category_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO categories
+                (id, name, description, icon, is_active, system_prompt, scoring_weights, default_hashtags, presets, publishing_preferences, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cat_id,
+                    category_data.get("name", cat_id),
+                    category_data.get("description", ""),
+                    category_data.get("icon", "sparkles"),
+                    1 if category_data.get("is_active", True) else 0,
+                    category_data.get("system_prompt", ""),
+                    json.dumps(category_data.get("scoring_weights", {})),
+                    json.dumps(category_data.get("default_hashtags", [])),
+                    json.dumps(category_data.get("presets", {})),
+                    json.dumps(category_data.get("publishing_preferences", {})),
+                    category_data["created_at"],
+                ),
+            )
+        return category_data
+
+    def update_category(self, category_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        current = self.get_category(category_id)
+        if not current:
+            return None
+        current.update(updates)
+        return self.save_category(current)
+
+    def list_publishing_accounts(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            query = self.client.table("publishing_accounts").select("*").eq("is_active", True)
+            if user_id:
+                query = query.eq("user_id", user_id)
+            res = query.order("created_at", desc=True).execute()
+            accounts = res.data or []
+        else:
+            with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cond = "WHERE is_active = 1"
+                params = []
+                if user_id:
+                    cond += " AND user_id = ?"
+                    params.append(user_id)
+                rows = conn.execute(f"SELECT * FROM publishing_accounts {cond} ORDER BY created_at DESC", params).fetchall()
+                accounts = [dict(r) for r in rows]
+
+        for acc in accounts:
+            if acc.get("access_token_encrypted"):
+                acc["access_token"] = decrypt_secret(acc["access_token_encrypted"])
+            if acc.get("refresh_token_encrypted"):
+                acc["refresh_token"] = decrypt_secret(acc["refresh_token_encrypted"])
+        return accounts
+
+
 db = DatabaseClient()
+

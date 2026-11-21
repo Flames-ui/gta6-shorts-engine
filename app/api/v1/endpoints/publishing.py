@@ -75,7 +75,7 @@ async def handle_buffer_callback(payload: BufferCallbackRequest):
 @router.get("/channels")
 async def list_connected_publishing_channels(auth: AuthContext = Depends(verify_api_key)):
     """List connected social channels (TikTok, YouTube Shorts, etc.) configured in Buffer."""
-    profiles = buffer_publisher.get_user_profiles()
+    profiles = buffer_publisher.get_user_profiles(user_id=auth.user_id)
     return {"channels": profiles, "total": len(profiles)}
 
 
@@ -85,3 +85,33 @@ async def get_publishing_queue(auth: AuthContext = Depends(verify_api_key)):
     user_id = None if auth.is_admin else auth.user_id
     items = db.list_publishing_queue(user_id=user_id)
     return {"items": items, "total": len(items)}
+
+@router.get("/accounts")
+async def list_connected_publishing_accounts(auth: AuthContext = Depends(verify_api_key)):
+    """List connected publishing provider accounts for authenticated user."""
+    user_id = None if auth.is_admin else auth.user_id
+    accounts = db.list_publishing_accounts(user_id=user_id)
+    safe_accounts = []
+    for acc in accounts:
+        safe_accounts.append({
+            "id": acc.get("id"),
+            "service": acc.get("service"),
+            "account_identifier": acc.get("account_identifier"),
+            "is_active": acc.get("is_active", True),
+            "created_at": acc.get("created_at"),
+            "has_token": bool(acc.get("access_token")),
+        })
+    return {"accounts": safe_accounts, "total": len(safe_accounts)}
+
+
+@router.post("/sync")
+async def sync_publishing_queue(auth: AuthContext = Depends(verify_api_key)):
+    """Synchronize publishing status with Buffer for all active queue items."""
+    user_id = None if auth.is_admin else auth.user_id
+    items = db.list_publishing_queue(user_id=user_id)
+    synced_items = []
+    for it in items:
+        if it.get("status") in ("scheduled", "publishing") and it.get("id"):
+            sync_res = buffer_publisher.sync_publishing_item_status(it["id"], user_id=auth.user_id)
+            synced_items.append({"id": it["id"], "result": sync_res})
+    return {"synced_count": len(synced_items), "items": synced_items}

@@ -13,6 +13,25 @@ logger = logging.getLogger("gta6_shorts.auth")
 security_bearer = HTTPBearer(auto_error=False)
 
 
+
+def _check_is_admin_claim(claims: Dict[str, Any], user_id: str) -> bool:
+    """
+    Validate administrator status using only trusted, server-controlled attributes.
+    Never trusts user_metadata, which end-users can self-modify in Supabase.
+    """
+    if claims.get("role") in ("service_role", "admin"):
+        return True
+    app_meta = claims.get("app_metadata", {})
+    if app_meta.get("is_admin") is True or app_meta.get("role") in ("admin", "service_role"):
+        return True
+    if user_id in settings.ADMIN_USER_IDS:
+        return True
+    email = claims.get("email")
+    if email and str(email).lower() in settings.ADMIN_EMAILS:
+        return True
+    return False
+
+
 class AuthContext(BaseModel):
     """Authenticated caller context."""
     user_id: str
@@ -123,7 +142,7 @@ async def verify_api_key(
             if claims and "sub" in claims:
                 user_id = str(claims["sub"])
                 user_role = claims.get("role", "authenticated")
-                is_admin = (user_role in ("service_role", "admin")) or (claims.get("user_metadata", {}).get("is_admin") is True)
+                is_admin = _check_is_admin_claim(claims, user_id)
                 return AuthContext(
                     user_id=user_id,
                     role=user_role,
@@ -155,7 +174,7 @@ async def verify_api_key(
         user_role = claims.get("role", "authenticated")
 
         # Admin privileges require verified service_role or admin claim in verified JWT
-        is_admin = (user_role == "service_role") or (claims.get("user_metadata", {}).get("is_admin") is True)
+        is_admin = _check_is_admin_claim(claims, user_id)
 
         return AuthContext(
             user_id=user_id,

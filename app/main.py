@@ -1,3 +1,4 @@
+from .services.rate_limiter import rate_limiter
 """FastAPI application entrypoint for GTA 6 & Multi-Category Viral Shorts Engine."""
 import logging
 from contextlib import asynccontextmanager
@@ -49,6 +50,20 @@ async def security_middleware(request: Request, call_next):
                 )
         except ValueError:
             pass
+
+    # Rate limiting on API paths (exempting load balancer health probes and documentation)
+    path = request.url.path
+    if not (path.startswith("/health") or path.startswith("/docs") or path.startswith("/openapi") or path.startswith("/redoc")):
+        auth_header = request.headers.get("X-API-Key") or request.headers.get("Authorization", "")
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"{client_ip}:{auth_header[:16]}"
+        if not rate_limiter.check(rate_key):
+            logger.warning("Rate limit exceeded for %s on %s", client_ip, path)
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Rate limit exceeded. Please wait before submitting more requests."},
+                headers={"Retry-After": "60"},
+            )
 
     response: Response = await call_next(request)
 

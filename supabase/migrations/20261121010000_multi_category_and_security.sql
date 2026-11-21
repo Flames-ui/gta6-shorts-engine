@@ -366,3 +366,42 @@ CREATE POLICY "Users can view analytics of own clips" ON public.platform_analyti
 CREATE POLICY "Users can manage own schedule" ON public.production_schedules FOR ALL TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
 -- Note: Anonymous role (anon) is granted NO access. All tables remain private.
+
+
+-- -----------------------------------------------------------------------------
+-- 15. System Security & Operational Audit Logs
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ip_address TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON public.audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON public.audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON public.audit_logs(created_at);
+
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access on audit_logs" ON public.audit_logs FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY "Users can view own audit logs" ON public.audit_logs FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+-- Additional column enhancements
+ALTER TABLE public.content_sources ADD COLUMN IF NOT EXISTS last_polled_at TIMESTAMPTZ;
+ALTER TABLE public.content_sources ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ;
+ALTER TABLE public.content_sources ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE public.content_sources ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER DEFAULT 0;
+ALTER TABLE public.content_sources ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active';
+
+ALTER TABLE public.source_permissions ADD COLUMN IF NOT EXISTS original_creator TEXT;
+ALTER TABLE public.source_permissions ADD COLUMN IF NOT EXISTS source_url TEXT;
+ALTER TABLE public.source_permissions ADD COLUMN IF NOT EXISTS permission_evidence TEXT;
+ALTER TABLE public.source_permissions ADD COLUMN IF NOT EXISTS derivative_rights_allowed BOOLEAN DEFAULT true;
+ALTER TABLE public.source_permissions ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+
+ALTER TABLE public.discovered_content ADD COLUMN IF NOT EXISTS viral_potential_score NUMERIC DEFAULT 0;
+ALTER TABLE public.discovered_content ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;

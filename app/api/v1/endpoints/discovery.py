@@ -51,6 +51,13 @@ async def register_content_source(
         verified_by=auth.user_id if auth.is_admin else None,
     )
 
+    db.create_audit_log(
+        action="source_registered",
+        resource_type="source",
+        user_id=auth.user_id,
+        resource_id=source_id,
+        details={"name": payload.name, "source_type": payload.source_type, "category_id": payload.category_id},
+    )
     return {"status": "created", "source": created_source}
 
 
@@ -105,6 +112,13 @@ async def update_source_rights(
         verified_by=auth.user_id,
     )
 
+    db.create_audit_log(
+        action="source_rights_updated",
+        resource_type="source",
+        user_id=auth.user_id,
+        resource_id=source_id,
+        details={"rights_status": payload.rights_status, "allowed_platforms": payload.allowed_platforms, "notes": payload.notes},
+    )
     return {
         "source_id": source_id,
         "rights_status": payload.rights_status,
@@ -129,7 +143,7 @@ async def get_discovery_feed(
     rss_adapter = RSSDiscoveryAdapter()
 
     for src in sources:
-        if src.get("source_type") == "rss" and src.get("feed_url"):
+        if src.get("source_type") in ("approved_rss", "rss") and src.get("feed_url"):
             try:
                 discovered = rss_adapter.discover_content(src, limit=5)
                 for item in discovered:
@@ -169,3 +183,74 @@ async def get_discovery_feed(
         ))
 
     return response_items
+
+
+@router.post("/poll")
+async def poll_content_sources(
+    source_id: Optional[str] = Query(None, description="Optional specific source ID to poll"),
+    category_id: Optional[str] = Query(None, description="Optional category filter"),
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Actively trigger content discovery polling across registered active sources.
+    Performs URL normalization, deduplication, content classification, and source health updates.
+    """
+    user_id = None if auth.is_admin else auth.user_id
+    if source_id:
+        src = db.get_source(source_id)
+        if not src:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Source {source_id} not found")
+        enforce_resource_ownership(src.get("user_id"), auth, "source")
+        sources = [src]
+    else:
+        sources = db.list_sources(user_id=user_id, category_id=category_id, active_only=True)
+
+    rss_adapter = RSSDiscoveryAdapter()
+    from ....services.discovery.duplicate_detector import duplicate_detector
+
+    total_polled = 0
+    new_items_count = 0
+    duplicates_count = 0
+    errors_count = 0
+
+    existing_content = db.list_discovered_content(user_id=user_id, limit=200)
+    seen_urls = {duplicate_detector.normalize_url(it.get("original_url") or "") for it in existing_content if it.get("original_url")}
+
+    for src in sources:
+        if src.get("source_type") in ("approved_rss", "rss") and src.get("feed_url"):
+            total_polled += 1
+            try:
+                discovered = rss_adapter.discover_content(src, limit=10)
+                for item in discovered:
+                    norm_url = duplicate_detector.normalize_url(item.original_url or "")
+                    if norm_url and norm_url in seen_urls:
+                        duplicates_count += 1
+                        continue
+
+                    db.save_discovered_content({
+                        "id": item.id,
+                        "source_id": src["id"],
+                        "user_id": src.get("user_id"),
+                        "title": item.title,
+                        "original_url": item.original_url,
+                        "media_url": item.media_url,
+                        "creator_name": item.creator_name,
+                        "category_id": src.get("category_id", "gaming"),
+                        "rights_status": item.rights_status.value,
+                        "duration_seconds": 0.0,
+                        "discovery_time": datetime.now(timezone.utc).isoformat(),
+                        "is_processed": False,
+                    })
+                    if norm_url:
+                        seen_urls.add(norm_url)
+                    new_items_count += 1
+            except Exception as exc:
+                logger.warning("Polling error on source %s: %s", src["id"], exc)
+                errors_count += 1
+
+    return {
+        "polled_sources": total_polled,
+        "new_items_discovered": new_items_count,
+        "duplicates_skipped": duplicates_count,
+        "errors": errors_count,
+    }

@@ -55,6 +55,9 @@ def run_worker():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    from .queue import job_queue
+    job_queue.recover_orphaned_jobs()
+
     worker = Worker(listen_queues, connection=redis_conn)
     worker.work(with_scheduler=True)
 

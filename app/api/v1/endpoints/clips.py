@@ -76,6 +76,13 @@ async def approve_clip(
         updates["suggested_tags"] = payload.hashtags
 
     updated = db.update_clip(clip_id, updates)
+    db.create_audit_log(
+        action="clip_reviewed",
+        resource_type="clip",
+        user_id=auth.user_id,
+        resource_id=clip_id,
+        details={"approved": is_approved, "status": new_status, "title": updated.get("title")},
+    )
     return updated
 
 
@@ -169,7 +176,9 @@ async def schedule_clip_publishing(
         profile_id=payload.channel_id,
         text=caption_text,
         media_url=clip.get("storage_url"),
+        thumbnail_url=clip.get("thumbnail_url"),
         scheduled_at=scheduled_iso,
+        user_id=auth.user_id,
     )
 
     if not buffer_res.get("success"):
@@ -196,6 +205,14 @@ async def schedule_clip_publishing(
         })
     except Exception as e:
         logger.warning("Could not persist publishing queue record: %s", e)
+
+    db.create_audit_log(
+        action="clip_scheduled",
+        resource_type="clip",
+        user_id=auth.user_id,
+        resource_id=clip_id,
+        details={"channel_id": payload.channel_id, "scheduled_for": scheduled_iso, "buffer_update_id": buffer_res.get("update_id")},
+    )
 
     return {
         "status": "scheduled",

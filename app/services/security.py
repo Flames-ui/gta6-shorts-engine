@@ -1,3 +1,8 @@
+import base64
+import hashlib
+import urllib.parse
+from cryptography.fernet import Fernet, InvalidToken
+import requests
 """Security utilities for SSRF protection, path traversal defense, and safe execution."""
 import ipaddress
 import logging
@@ -105,8 +110,10 @@ def validate_safe_url(url: str, require_https: bool = True, allowed_hosts: Optio
                         f"Host '{hostname}' resolves to private/internal IP address '{resolved_ip}', which is forbidden."
                     )
         except socket.gaierror as exc:
-            # If resolution fails during validation, reject in production
+            from ..config import settings
             logger.warning("Could not resolve host '%s' during safety check: %s", hostname, exc)
+            if settings.ENVIRONMENT.lower() == "production" and settings.FAIL_CLOSED_IN_PRODUCTION:
+                raise SecurityValidationError(f"Could not resolve host '{hostname}' in production: {exc}")
 
     return cleaned_url
 
@@ -165,3 +172,81 @@ def safe_subprocess_run(
     except subprocess.CalledProcessError as exc:
         logger.error("Command failed with code %d: %s\nStderr: %s", exc.returncode, cmd[:3], exc.stderr)
         raise
+
+
+# -----------------------------------------------------------------------------
+# Cryptographic Token Encryption at Rest
+# -----------------------------------------------------------------------------
+
+def _get_fernet_instance() -> Fernet:
+    """Derive a deterministic Fernet cipher key from server configuration."""
+    from ..config import settings
+    raw_key = (
+        (settings.TOKEN_ENCRYPTION_KEY or "").strip()
+        or (settings.ENGINE_API_KEY or "").strip()
+        or (settings.SUPABASE_JWT_SECRET or "").strip()
+        or "gta6_shorts_engine_production_fallback_key_32bytes_min"
+    )
+    derived = hashlib.sha256(raw_key.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(derived))
+
+
+def encrypt_secret(plaintext: Optional[str]) -> Optional[str]:
+    """Encrypt a sensitive string (e.g. OAuth access or refresh token) at rest."""
+    if plaintext is None:
+        return None
+    val = str(plaintext).strip()
+    if not val:
+        return ""
+    try:
+        fernet = _get_fernet_instance()
+        return fernet.encrypt(val.encode("utf-8")).decode("utf-8")
+    except Exception as exc:
+        logger.error("Encryption failure: %s", exc)
+        raise RuntimeError("Failed to encrypt secret token") from exc
+
+
+def decrypt_secret(ciphertext: Optional[str]) -> Optional[str]:
+    """Decrypt a sensitive string at rest. If plaintext or invalid token, returns safely."""
+    if ciphertext is None:
+        return None
+    val = str(ciphertext).strip()
+    if not val:
+        return ""
+    try:
+        fernet = _get_fernet_instance()
+        return fernet.decrypt(val.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        return val
+    except Exception as exc:
+        logger.warning("Decryption failure: %s; returning original", exc)
+        return val
+
+
+# -----------------------------------------------------------------------------
+# SSRF-Protected HTTP Client with Redirect Verification
+# -----------------------------------------------------------------------------
+
+def safe_requests_get(
+    url: str,
+    headers: Optional[dict] = None,
+    timeout: int = 15,
+    max_redirects: int = 5,
+    require_https: bool = True,
+    **kwargs,
+) -> requests.Response:
+    """
+    Execute an HTTP GET request with SSRF protection on the target URL AND on every redirect hop.
+    """
+    current_url = url
+    for _ in range(max_redirects + 1):
+        safe_url = validate_safe_url(current_url, require_https=require_https)
+        resp = requests.get(safe_url, headers=headers, timeout=timeout, allow_redirects=False, **kwargs)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+            current_url = urllib.parse.urljoin(current_url, location)
+            continue
+        return resp
+    raise SecurityValidationError(f"Exceeded maximum allowable redirects ({max_redirects}) during safe request")

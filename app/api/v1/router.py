@@ -2,18 +2,24 @@
 from fastapi import APIRouter
 from .endpoints import (
     analytics,
+    audit_logs,
+    auth,
     categories,
     channels,
     clips,
+    dashboard,
     discovery,
     jobs,
     publishing,
+    quotas,
     schedules,
     status,
 )
 
 api_v1_router = APIRouter(prefix="/api/v1")
 
+api_v1_router.include_router(auth.router)
+api_v1_router.include_router(dashboard.router)
 api_v1_router.include_router(status.router)
 api_v1_router.include_router(jobs.router)
 api_v1_router.include_router(clips.router)
@@ -22,4 +28,6 @@ api_v1_router.include_router(discovery.router)
 api_v1_router.include_router(publishing.router)
 api_v1_router.include_router(analytics.router)
 api_v1_router.include_router(schedules.router)
+api_v1_router.include_router(quotas.router)
 api_v1_router.include_router(channels.router)
+api_v1_router.include_router(audit_logs.router)

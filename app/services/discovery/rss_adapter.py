@@ -4,8 +4,9 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-import requests
-from ..security import validate_safe_url
+import hashlib
+from ..security import safe_requests_get, validate_safe_url
+from ..supabase_client import db
 from .base import BaseSourceAdapter, DiscoveredContentItem, RightsStatus, SourceType
 
 logger = logging.getLogger("gta6_shorts.discovery.rss")
@@ -22,18 +23,13 @@ class RSSSourceAdapter(BaseSourceAdapter):
         if not feed_url:
             return []
 
-        # Validate URL against SSRF
-        try:
-            safe_feed_url = validate_safe_url(feed_url, require_https=True)
-        except Exception as e:
-            logger.error("RSS feed URL failed security check: %s", e)
-            return []
-
+        source_id = str(source_config.get("id", "rss_source"))
         items: List[DiscoveredContentItem] = []
         try:
-            resp = requests.get(safe_feed_url, timeout=10, headers={"User-Agent": "GTA6-Shorts-Discovery/2.0"})
+            resp = safe_requests_get(feed_url, timeout=12, headers={"User-Agent": "GTA6-Shorts-Discovery/2.0"})
             if resp.status_code != 200:
                 logger.warning("Failed to fetch RSS feed: HTTP %d", resp.status_code)
+                db.update_source_health(source_id, status="error", error=f"HTTP {resp.status_code}", increment_failures=True)
                 return []
 
             root = ET.fromstring(resp.content)
@@ -53,7 +49,8 @@ class RSSSourceAdapter(BaseSourceAdapter):
                 enclosure = entry.find("enclosure")
                 media_url = enclosure.get("url") if enclosure is not None else None
 
-                item_id = f"rss_{uuid.uuid4().hex[:10]}"
+                item_hash = hashlib.sha256((link or title or "").encode()).hexdigest()[:16]
+                item_id = f"rss_{item_hash}"
                 item = DiscoveredContentItem(
                     id=item_id,
                     source_id=source_config.get("id", "rss_source"),
@@ -67,8 +64,12 @@ class RSSSourceAdapter(BaseSourceAdapter):
                     attribution_text=f"Source: {channel_title} ({link or safe_feed_url})",
                 )
                 items.append(item)
+            # Update source health on success
+            now_iso = datetime.now(timezone.utc).isoformat()
+            db.update_source_health(source_id, status="healthy", last_success_at=now_iso, reset_failures=True)
         except Exception as exc:
             logger.error("Error parsing RSS feed %s: %s", feed_url, exc)
+            db.update_source_health(source_id, status="error", error=str(exc), increment_failures=True)
 
         return items
 

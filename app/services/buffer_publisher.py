@@ -102,19 +102,45 @@ class BufferPublisherService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+
+    def _resolve_token(self, user_id: Optional[str] = None) -> Optional[str]:
+        """Retrieve decrypted access token for specific user, or fallback to system token."""
+        if user_id:
+            acc = db.get_publishing_account_for_user(user_id, "buffer")
+            if acc and acc.get("access_token"):
+                return acc["access_token"]
+        return self.access_token
+
+    def _get_headers_for(self, user_id: Optional[str] = None, token_override: Optional[str] = None) -> Dict[str, str]:
+        token = token_override or self._resolve_token(user_id)
+        if not token:
+            raise RuntimeError("Buffer access token is not configured or user account is not connected.")
+        return {"Authorization": f"Bearer {token}"}
+
+    @staticmethod
+    def validate_platform_spec(platform: str, duration_seconds: float, aspect_ratio: str = "9:16") -> Tuple[bool, str]:
+        """Validate video specifications against target platform limits."""
+        p = platform.lower()
+        if "tiktok" in p and duration_seconds > 60.0:
+            return False, f"TikTok video duration ({duration_seconds:.1f}s) exceeds 60s Shorts limit."
+        if "youtube" in p and duration_seconds > 60.0:
+            return False, f"YouTube Shorts video duration ({duration_seconds:.1f}s) exceeds 60s limit."
+        return True, "Compliant with platform specifications."
+
     def _get_headers(self) -> Dict[str, str]:
         if not self.access_token:
             raise RuntimeError("Buffer access token is not configured.")
         return {"Authorization": f"Bearer {self.access_token}"}
 
-    def get_connected_profiles(self) -> List[BufferProfile]:
+    def get_connected_profiles(self, user_id: Optional[str] = None) -> List[BufferProfile]:
         """Discover connected social media channels in the user's Buffer account."""
-        if not self.is_configured() or not self.access_token:
+        token = self._resolve_token(user_id)
+        if not token:
             return []
 
         url = f"{BUFFER_API_BASE}/profiles.json"
         try:
-            resp = requests.get(url, headers=self._get_headers(), timeout=15)
+            resp = requests.get(url, headers=self._get_headers_for(user_id=user_id), timeout=15)
             if resp.status_code != 200:
                 logger.error("Buffer profiles request failed: HTTP %d %s", resp.status_code, resp.text)
                 return []
@@ -137,9 +163,9 @@ class BufferPublisherService:
             logger.error("Error retrieving Buffer profiles: %s", exc)
             return []
 
-    def get_user_profiles(self) -> List[Dict[str, Any]]:
-        """Return connected profiles as dictionaries."""
-        return [p.model_dump() for p in self.get_connected_profiles()]
+    def get_user_profiles(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return connected profiles as dictionaries for specific user."""
+        return [p.model_dump() for p in self.get_connected_profiles(user_id=user_id)]
 
     def schedule_clip_publication(
         self,
@@ -152,6 +178,7 @@ class BufferPublisherService:
         clip_record: Optional[Dict[str, Any]] = None,
         caption: Optional[str] = None,
         profile_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Submit an approved clip to the Buffer queue for specified profiles (TikTok, YouTube, etc.).
@@ -180,11 +207,11 @@ class BufferPublisherService:
         if not media_url:
             raise ValueError("A valid public media URL is required for Buffer publishing.")
 
-        if not self.is_configured() or not self.access_token:
-            # Report truthful status instead of faking success
+        token = self._resolve_token(user_id)
+        if not token:
             return {
                 "success": False,
-                "error": "Buffer publishing is awaiting configuration. Configure BUFFER_ACCESS_TOKEN or connect via OAuth.",
+                "error": "Buffer publishing is awaiting authorization. Connect your Buffer account via /api/v1/publishing/buffer/connect first.",
             }
 
         url = f"{BUFFER_API_BASE}/updates/create.json"
@@ -213,7 +240,7 @@ class BufferPublisherService:
             payload[f"profile_ids[{idx}]"] = pid
 
         try:
-            resp = requests.post(url, data=payload, headers=self._get_headers(), timeout=20)
+            resp = requests.post(url, data=payload, headers=self._get_headers_for(user_id=user_id), timeout=20)
             if resp.status_code != 200:
                 logger.error("Buffer update creation failed: HTTP %d %s", resp.status_code, resp.text)
                 return {
@@ -263,4 +290,45 @@ class BufferPublisherService:
         return resp.json()
 
 
+
+    def sync_publishing_item_status(self, queue_item_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Check remote Buffer update status and update publishing_queue and generated_clips accordingly."""
+        item = None
+        if db.has_supabase:
+            res = db.client.table("publishing_queue").select("*").eq("id", queue_item_id).limit(1).execute()
+            if res.data:
+                item = res.data[0]
+
+        if not item or not item.get("platform_update_id"):
+            return {"status": "unknown", "synced": False, "error": "Queue item or platform_update_id not found"}
+
+        update_id = item["platform_update_id"]
+        token = self._resolve_token(user_id or item.get("user_id"))
+        if not token:
+            return {"status": item.get("status"), "synced": False, "error": "Awaiting Buffer authorization"}
+
+        try:
+            url = f"{BUFFER_API_BASE}/updates/{update_id}.json"
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=12)
+            if resp.status_code != 200:
+                return {"status": item.get("status"), "synced": False, "error": f"Buffer HTTP {resp.status_code}"}
+
+            data = resp.json()
+            buffer_status = data.get("status", "buffer").lower()
+            new_status = "scheduled"
+            if buffer_status == "sent":
+                new_status = "published"
+            elif buffer_status in ("failed", "error"):
+                new_status = "failed"
+
+            if db.has_supabase:
+                db.client.table("publishing_queue").update({"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", queue_item_id).execute()
+                if new_status == "published" and item.get("clip_id"):
+                    db.client.table("generated_clips").update({"publishing_status": "published"}).eq("id", item["clip_id"]).execute()
+            return {"status": new_status, "synced": True, "buffer_status": buffer_status}
+        except Exception as exc:
+            return {"status": item.get("status"), "synced": False, "error": str(exc)}
+
+
 buffer_publisher = BufferPublisherService()
+

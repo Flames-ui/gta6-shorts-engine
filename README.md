@@ -228,14 +228,27 @@ To deploy, connect your GitHub repository to [Render](https://render.com) and de
 Lovable dashboards connect to the backend using standard HTTPS requests with the `X-API-Key: <ENGINE_API_KEY>` header:
 
 ### Key Endpoints for Lovable:
-- `GET /health`: Service and dependency status.
-- `GET /api/v1/categories`: Retrieve all categories for selection dropdowns.
-- `POST /api/v1/jobs`: Create video processing job (`url`, `category_id`, `num_clips`, `aspect_ratio`).
-- `GET /api/v1/jobs/{job_id}`: Poll job progress and status (`queued`, `downloading`, `transcribing`, `analyzing`, `rendering`, `completed`, `failed`).
-- `GET /api/v1/clips/{clip_id}`: Retrieve clip details, signed video URL, and generated hooks.
-- `POST /api/v1/clips/{clip_id}/approve`: Mark a clip as approved for social publishing.
-- `POST /api/v1/clips/{clip_id}/schedule`: Submit approved clip to Buffer for scheduled release.
-- `GET /api/v1/analytics/overview`: High-level multi-platform performance metrics.
+- `GET /health`, `/health/ready`, `/health/live`: Health, readiness, and liveness probes.
+- `GET /api/v1/auth/me`: Inspect caller identity, role, and administrator status.
+- `GET /api/v1/dashboard/stats`: Aggregated metrics for Lovable summary cards (total jobs, active jobs, approved clips, active categories, workers).
+- `GET /api/v1/categories`: Retrieve all active and custom categories.
+- `PATCH /api/v1/categories/{category_id}`: Enable, disable, or tune category prompts and scoring weights (Admin only).
+- `POST /api/v1/jobs`: Create video processing job (`url`, `category_id`, `num_clips`, `aspect_ratio`, `mode`).
+- `GET /api/v1/jobs/{job_id}`: Poll job progress, current stage, and execution logs.
+- `GET /api/v1/clips`: List clips with pagination and category filtering (scoped to tenant).
+- `GET /api/v1/clips/{clip_id}`: Retrieve clip details, storage URL, and thumbnail.
+- `POST /api/v1/clips/{clip_id}/approve`: Review and approve a clip for publication.
+- `POST /api/v1/clips/{clip_id}/schedule`: Submit approved clip to Buffer queue with quota and duplicate checks.
+- `GET /api/v1/publishing/buffer/connect`: Generate single-use Buffer OAuth authorization URL.
+- `POST /api/v1/publishing/buffer/callback`: Complete Buffer OAuth with encrypted token persistence.
+- `GET /api/v1/publishing/channels`: List connected social channel profiles for authenticated user.
+- `POST /api/v1/publishing/sync`: Synchronize publishing queue status with Buffer provider API.
+- `GET /api/v1/discovery/feed`: Retrieve discovered content opportunities.
+- `POST /api/v1/discovery/poll`: Actively poll sources with URL normalization and deduplication.
+- `GET /api/v1/quotas`: Check daily production target limits and real-time category distribution.
+- `GET /api/v1/analytics/overview`: Aggregate views, completion rate, and platform metrics.
+- `GET /api/v1/analytics/recommendations`: Empirical data-driven production recommendations.
+- `GET /api/v1/audit-logs`: Review security and operational audit logs.
 
 ---
 

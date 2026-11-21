@@ -24,8 +24,18 @@ services:
         value: INFO
       - key: FAIL_CLOSED_IN_PRODUCTION
         value: "true"
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
       - key: ENGINE_API_KEY
         generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: ADMIN_USER_IDS
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
       - key: CORS_ORIGINS
         value: "https://lovable.dev,https://lovable.app"
       - key: REDIS_URL
@@ -85,6 +95,10 @@ services:
         value: INFO
       - key: FAIL_CLOSED_IN_PRODUCTION
         value: "true"
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
       - key: REDIS_URL
         fromService:
           type: redis

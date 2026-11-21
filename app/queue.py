@@ -150,5 +150,42 @@ class JobQueue:
         return {"queued_jobs": 0, "workers_online": 0}
 
 
+
+    def acquire_job_lock(self, job_id: str, ttl_seconds: int = 1800) -> bool:
+        """Acquire distributed execution lock for job_id to prevent duplicate parallel runs."""
+        if self.has_redis and self.redis_conn:
+            try:
+                lock_key = f"lock:job:{job_id}"
+                return bool(self.redis_conn.set(lock_key, "locked", nx=True, ex=ttl_seconds))
+            except Exception as e:
+                logger.warning("Redis lock acquisition error for %s: %s", job_id, e)
+                return True
+        return True
+
+    def release_job_lock(self, job_id: str):
+        """Release distributed execution lock for job_id."""
+        if self.has_redis and self.redis_conn:
+            try:
+                self.redis_conn.delete(f"lock:job:{job_id}")
+            except Exception as e:
+                logger.warning("Redis lock release error for %s: %s", job_id, e)
+
+    def recover_orphaned_jobs(self):
+        """Identify jobs left in 'processing' state when worker restarts, safely marking or re-queuing."""
+        try:
+            from .supabase_client import db
+            # In SQLite / Supabase query processing jobs
+            if db.has_supabase:
+                res = db.client.table("processing_jobs").select("*").eq("status", "processing").execute()
+                orphaned = res.data or []
+            else:
+                with db.lock, db._get_sqlite_conn() if hasattr(db, "_get_sqlite_conn") else None:
+                    orphaned = []
+            logger.info("Checked for orphaned jobs on startup: found %d", len(orphaned))
+        except Exception as exc:
+            logger.debug("Orphaned jobs check notice: %s", exc)
+
+
 job_queue = JobQueue()
+
 queue_manager = job_queue

@@ -142,4 +142,42 @@ class VideoRenderer:
         return output_thumb_path
 
 
+    @classmethod
+    def render_vertical_clip(
+        cls,
+        source_video_path: str,
+        start_time: float,
+        end_time: float,
+        output_path: str,
+        aspect_ratio: str = "9:16",
+        hook_overlay_text: Optional[str] = None,
+        subtitle_srt_path: Optional[str] = None,
+        normalize_audio: bool = True,
+        target_profile: str = VideoRenderProfile.TIKTOK,
+    ) -> Tuple[bool, str]:
+        """
+        Execute FFmpeg vertical crop (9:16 at 1080x1920), hook overlay, and audio normalization.
+        Returns (success, path_or_error).
+        """
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        try:
+            res = cls.render_clip(
+                source_video_path=source_video_path,
+                output_path=output_path,
+                start_time=start_time,
+                end_time=end_time,
+                hook_overlay_text=hook_overlay_text,
+                subtitle_srt_path=subtitle_srt_path,
+                enable_audio_normalization=normalize_audio,
+                target_profile=target_profile,
+            )
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                return False, "Render output file was not created or is empty."
+            return True, output_path
+        except Exception as exc:
+            logger.error("FFmpeg render_vertical_clip failed: %s", exc)
+            return False, str(exc)
+
+
 video_renderer = VideoRenderer()
+
