@@ -1,508 +1,508 @@
-"""Supabase database and storage integration with resilient local fallback."""
+"""Supabase database persistence service with multi-category support and fail-closed production safety."""
+import json
 import logging
 import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 from ..config import settings
 
 logger = logging.getLogger("gta6_shorts.supabase")
 
 
 class DatabaseClient:
-    """Manages persistence for jobs, clips, logs, and channel monitoring."""
+    """Manages persistent data for jobs, clips, categories, sources, publishing, and scheduling."""
 
     def __init__(self):
         self.client = None
-        self.has_supabase = bool(settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY)
         self.lock = threading.RLock()
+        is_prod = settings.ENVIRONMENT.lower() == "production"
+        has_creds = bool(settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY)
 
-        if self.has_supabase:
+        if has_creds:
             try:
-                from supabase import create_client, Client
+                from supabase import Client, create_client
                 self.client: Client = create_client(
                     settings.SUPABASE_URL,
                     settings.SUPABASE_SERVICE_ROLE_KEY,
                 )
-                logger.info("Supabase client initialized with URL: %s", settings.SUPABASE_URL)
+                logger.info("Supabase client initialized with endpoint: %s", settings.SUPABASE_URL)
+                self.has_supabase = True
             except Exception as e:
-                logger.error("Failed to initialize Supabase client, falling back to SQLite: %s", e)
+                logger.error("Failed to initialize Supabase client: %s", e)
+                if is_prod and settings.FAIL_CLOSED_IN_PRODUCTION:
+                    raise RuntimeError(f"FATAL: Supabase initialization failed in production: {e}")
                 self.has_supabase = False
+        else:
+            if is_prod and settings.FAIL_CLOSED_IN_PRODUCTION:
+                raise RuntimeError(
+                    "FATAL: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured in production. "
+                    "Fail-closed policy prevents ephemeral SQLite fallback."
+                )
+            self.has_supabase = False
 
         if not self.has_supabase:
-            logger.info("Running with embedded SQLite persistence (Supabase credentials not configured).")
+            logger.info("Initializing embedded SQLite storage for development/test environment.")
             self._init_sqlite()
 
     def _init_sqlite(self):
-        """Initialize local SQLite tables matching the Supabase schema."""
+        """Initialize comprehensive SQLite database for local development and testing."""
         db_path = os.path.join(settings.LOCAL_OUTPUT_DIR, "shorts_engine.db")
-        os.makedirs(settings.LOCAL_OUTPUT_DIR, exist_ok=True)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("""
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.sqlite_path = db_path
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS categories (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    icon TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    system_prompt TEXT,
+                    scoring_weights TEXT,
+                    default_hashtags TEXT,
+                    presets TEXT,
+                    publishing_preferences TEXT,
+                    created_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS content_sources (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    source_type TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    feed_url TEXT,
+                    channel_url TEXT,
+                    category_id TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    auto_clip_enabled INTEGER DEFAULT 0,
+                    created_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS source_permissions (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    rights_status TEXT NOT NULL,
+                    license_type TEXT,
+                    allowed_platforms TEXT,
+                    expires_at TEXT,
+                    created_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS discovered_content (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT,
+                    user_id TEXT,
+                    title TEXT NOT NULL,
+                    original_url TEXT,
+                    media_url TEXT,
+                    creator_name TEXT,
+                    category_id TEXT,
+                    rights_status TEXT,
+                    content_hash TEXT,
+                    discovery_time TEXT,
+                    is_processed INTEGER DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
+                    user_id TEXT,
                     url TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    stage TEXT NOT NULL,
-                    progress INTEGER DEFAULT 0,
-                    num_clips INTEGER DEFAULT 3,
+                    category_id TEXT DEFAULT 'gaming',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    stage TEXT NOT NULL DEFAULT 'pending',
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    num_clips INTEGER NOT NULL DEFAULT 3,
+                    aspect_ratio TEXT NOT NULL DEFAULT '9:16',
                     video_title TEXT,
                     video_duration REAL,
-                    mode TEXT DEFAULT 'local',
-                    llm_provider TEXT DEFAULT 'gemini',
+                    mode TEXT NOT NULL DEFAULT 'local',
+                    llm_provider TEXT NOT NULL DEFAULT 'gemini',
                     gta_preset INTEGER DEFAULT 1,
                     error TEXT,
-                    retry_count INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT,
-                    completed_at TEXT
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS clips (
-                    id TEXT PRIMARY KEY,
-                    job_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    hook TEXT,
-                    score INTEGER DEFAULT 0,
-                    start_time REAL NOT NULL,
-                    end_time REAL NOT NULL,
-                    duration REAL NOT NULL,
-                    aspect_ratio TEXT DEFAULT '9:16',
-                    clip_url TEXT,
-                    storage_path TEXT,
-                    thumbnail_url TEXT,
-                    captions TEXT,
-                    hashtags TEXT,
-                    publishing_status TEXT DEFAULT 'draft',
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(job_id) REFERENCES jobs(id)
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS processing_logs (
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS job_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL,
                     stage TEXT NOT NULL,
                     message TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(job_id) REFERENCES jobs(id)
-                )
-            """)
-            cur.execute("""
+                    created_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS clips (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    user_id TEXT,
+                    category_id TEXT DEFAULT 'gaming',
+                    title TEXT NOT NULL,
+                    hook_sentence TEXT,
+                    virality_reason TEXT,
+                    score REAL NOT NULL DEFAULT 0,
+                    start_time REAL NOT NULL,
+                    end_time REAL NOT NULL,
+                    duration REAL NOT NULL,
+                    aspect_ratio TEXT NOT NULL DEFAULT '9:16',
+                    storage_path TEXT,
+                    storage_url TEXT NOT NULL,
+                    thumbnail_url TEXT,
+                    publishing_status TEXT NOT NULL DEFAULT 'draft',
+                    suggested_tags TEXT,
+                    is_quality_approved INTEGER DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS channels (
                     id TEXT PRIMARY KEY,
-                    channel_url TEXT NOT NULL,
+                    user_id TEXT,
+                    platform TEXT DEFAULT 'youtube',
                     channel_name TEXT NOT NULL,
+                    channel_url TEXT NOT NULL,
                     auto_clip_new_videos INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL
-                )
+                    created_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS publishing_queue (
+                    id TEXT PRIMARY KEY,
+                    clip_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT,
+                    platform TEXT NOT NULL,
+                    scheduled_for TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    platform_update_id TEXT,
+                    error_message TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
             """)
-            self.conn.commit()
 
-    # --- Job Operations ---
-
+    # -------------------------------------------------------------------------
+    # Jobs CRUD
+    # -------------------------------------------------------------------------
     def create_job(self, job_data: Dict[str, Any]) -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
-        job_data["created_at"] = now
-        job_data["updated_at"] = now
+        now_iso = datetime.now(timezone.utc).isoformat()
+        job_data["created_at"] = job_data.get("created_at") or now_iso
+        job_data["updated_at"] = now_iso
+        job_data.setdefault("category_id", "gaming")
 
         if self.has_supabase:
-            try:
-                row = {
-                    "id": job_data["id"],
-                    "url": job_data["url"],
-                    "status": job_data["status"],
-                    "stage": job_data.get("stage", "pending"),
-                    "progress": job_data.get("progress", 0),
-                    "num_clips": job_data.get("num_clips", 3),
-                    "video_title": job_data.get("video_title"),
-                    "video_duration": job_data.get("video_duration"),
-                    "mode": job_data.get("mode", "local"),
-                    "llm_provider": job_data.get("llm_provider", "gemini"),
-                    "gta_preset": bool(job_data.get("gta_preset", True)),
-                    "retry_count": job_data.get("retry_count", 0),
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                res = self.client.table("jobs").insert(row).execute()
-                return res.data[0] if res.data else job_data
-            except Exception as e:
-                logger.error("Supabase insert job error: %s", e)
+            payload = dict(job_data)
+            # Remove transient attributes
+            payload.pop("custom_prompt", None)
+            payload.pop("title_prefix", None)
+            payload.pop("target_format", None)
+            payload.pop("language", None)
+            res = self.client.table("processing_jobs").insert(payload).execute()
+            return res.data[0] if res.data else job_data
 
-        # Fallback to SQLite
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO jobs (id, url, status, stage, progress, num_clips, video_title, video_duration, mode, llm_provider, gta_preset, retry_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                job_data["id"],
-                job_data["url"],
-                str(job_data["status"]),
-                str(job_data.get("stage", "pending")),
-                job_data.get("progress", 0),
-                job_data.get("num_clips", 3),
-                job_data.get("video_title"),
-                job_data.get("video_duration"),
-                job_data.get("mode", "local"),
-                job_data.get("llm_provider", "gemini"),
-                1 if job_data.get("gta_preset", True) else 0,
-                job_data.get("retry_count", 0),
-                now,
-                now,
-            ))
-            self.conn.commit()
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO jobs
+                (id, user_id, url, category_id, status, stage, progress, num_clips, aspect_ratio,
+                 video_title, video_duration, mode, llm_provider, gta_preset, error, retry_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_data["id"],
+                    job_data.get("user_id"),
+                    job_data["url"],
+                    job_data.get("category_id", "gaming"),
+                    job_data.get("status", "queued"),
+                    job_data.get("stage", "pending"),
+                    job_data.get("progress", 0),
+                    job_data.get("num_clips", 3),
+                    job_data.get("aspect_ratio", "9:16"),
+                    job_data.get("video_title"),
+                    job_data.get("video_duration"),
+                    job_data.get("mode", "local"),
+                    job_data.get("llm_provider", "gemini"),
+                    1 if job_data.get("gta_preset", True) else 0,
+                    job_data.get("error"),
+                    job_data.get("retry_count", 0),
+                    job_data["created_at"],
+                    job_data["updated_at"],
+                ),
+            )
         return job_data
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        job_dict = None
         if self.has_supabase:
-            try:
-                res = self.client.table("jobs").select("*").eq("id", job_id).execute()
-                if res.data:
-                    job_dict = dict(res.data[0])
-            except Exception as e:
-                logger.error("Supabase get_job error: %s", e)
+            res = self.client.table("processing_jobs").select("*").eq("id", job_id).execute()
+            if not res.data:
+                return None
+            job = res.data[0]
+            # Fetch associated clips and logs
+            clips_res = self.client.table("generated_clips").select("*").eq("job_id", job_id).execute()
+            job["clips"] = clips_res.data or []
+            logs_res = self.client.table("processing_logs").select("*").eq("job_id", job_id).order("created_at").execute()
+            job["logs"] = logs_res.data or []
+            return job
 
-        if not job_dict:
-            with self.lock:
-                cur = self.conn.cursor()
-                cur.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
-                row = cur.fetchone()
-                if row:
-                    job_dict = dict(row)
-                    job_dict["gta_preset"] = bool(job_dict.get("gta_preset", 1))
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            row = cur.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if not row:
+                return None
+            job = dict(row)
+            job["gta_preset"] = bool(job.get("gta_preset", 1))
 
-        if not job_dict:
-            return None
+            # Fetch clips
+            clip_rows = cur.execute("SELECT * FROM clips WHERE job_id = ?", (job_id,)).fetchall()
+            job["clips"] = [self._format_clip_row(c) for c in clip_rows]
 
-        # Attach clips and logs
-        job_dict["clips"] = self.get_clips_for_job(job_id)
-        job_dict["logs"] = self.get_logs_for_job(job_id)
-        return job_dict
+            # Fetch logs
+            log_rows = cur.execute("SELECT stage, message, created_at FROM job_logs WHERE job_id = ? ORDER BY id ASC", (job_id,)).fetchall()
+            job["logs"] = [{"stage": r["stage"], "message": r["message"], "timestamp": r["created_at"]} for r in log_rows]
+            return job
 
-    def find_active_job_by_url(self, url: str) -> Optional[Dict[str, Any]]:
-        """Used for duplicate detection (status: queued or processing)."""
+    def list_jobs(self, limit: int = 20, offset: int = 0, status: Optional[str] = None, user_id: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
         if self.has_supabase:
-            try:
-                res = (
-                    self.client.table("jobs")
-                    .select("*")
-                    .eq("url", url)
-                    .in_("status", ["queued", "processing"])
-                    .order("created_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                if res.data:
-                    return dict(res.data[0])
-            except Exception as e:
-                logger.error("Supabase duplicate check error: %s", e)
-
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("""
-                SELECT * FROM jobs
-                WHERE url = ? AND status IN ('queued', 'processing')
-                ORDER BY created_at DESC LIMIT 1
-            """, (url,))
-            row = cur.fetchone()
-            if row:
-                d = dict(row)
-                d["gta_preset"] = bool(d.get("gta_preset", 1))
-                return d
-        return None
-
-    def list_jobs(self, limit: int = 20, offset: int = 0, status: Optional[str] = None) -> (List[Dict[str, Any]], int):
-        if self.has_supabase:
-            try:
-                q = self.client.table("jobs").select("*", count="exact")
-                if status:
-                    q = q.eq("status", status)
-                res = q.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
-                total = res.count if res.count is not None else len(res.data)
-                items = [dict(r) for r in res.data]
-                for it in items:
-                    it["clips"] = self.get_clips_for_job(it["id"])
-                    it["logs"] = []
-                return items, total
-            except Exception as e:
-                logger.error("Supabase list_jobs error: %s", e)
-
-        with self.lock:
-            cur = self.conn.cursor()
+            query = self.client.table("processing_jobs").select("*", count="exact")
             if status:
-                cur.execute("SELECT COUNT(*) FROM jobs WHERE status = ?", (status,))
-                total = cur.fetchone()[0]
-                cur.execute("SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?", (status, limit, offset))
-            else:
-                cur.execute("SELECT COUNT(*) FROM jobs")
-                total = cur.fetchone()[0]
-                cur.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit, offset))
-            rows = cur.fetchall()
+                query = query.eq("status", status)
+            if user_id:
+                query = query.eq("user_id", user_id)
+            res = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+            return res.data or [], res.count or 0
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            conditions = []
+            params: List[Any] = []
+            if status:
+                conditions.append("status = ?")
+                params.append(status)
+            if user_id:
+                conditions.append("user_id = ?")
+                params.append(user_id)
+
+            where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            total = cur.execute(f"SELECT COUNT(*) FROM jobs {where_clause}", params).fetchone()[0]
+
+            query_sql = f"SELECT * FROM jobs {where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            rows = cur.execute(query_sql, params + [limit, offset]).fetchall()
             items = []
             for r in rows:
-                d = dict(r)
-                d["gta_preset"] = bool(d.get("gta_preset", 1))
-                d["clips"] = self.get_clips_for_job(d["id"])
-                d["logs"] = []
-                items.append(d)
+                item = dict(r)
+                item["gta_preset"] = bool(item.get("gta_preset", 1))
+                item["clips"] = []
+                item["logs"] = []
+                items.append(item)
             return items, total
 
     def update_job_progress(
         self,
         job_id: str,
-        stage: str,
-        progress: int,
+        stage: Optional[str] = None,
+        progress: Optional[int] = None,
         status: Optional[str] = None,
         error: Optional[str] = None,
+        retry_count: Optional[int] = None,
         video_title: Optional[str] = None,
         video_duration: Optional[float] = None,
-        retry_count: Optional[int] = None,
     ):
-        now = datetime.now(timezone.utc).isoformat()
-        updates: Dict[str, Any] = {
-            "stage": stage,
-            "progress": progress,
-            "updated_at": now,
-        }
-        if status:
-            updates["status"] = status
-            if status == "completed":
-                updates["completed_at"] = now
-        if error:
-            updates["error"] = error
-        if video_title:
-            updates["video_title"] = video_title
-        if video_duration is not None:
-            updates["video_duration"] = video_duration
-        if retry_count is not None:
-            updates["retry_count"] = retry_count
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updates: Dict[str, Any] = {"updated_at": now_iso}
+        if stage is not None: updates["stage"] = stage
+        if progress is not None: updates["progress"] = progress
+        if status is not None: updates["status"] = status
+        if error is not None: updates["error"] = error
+        if retry_count is not None: updates["retry_count"] = retry_count
+        if video_title is not None: updates["video_title"] = video_title
+        if video_duration is not None: updates["video_duration"] = video_duration
 
         if self.has_supabase:
-            try:
-                self.client.table("jobs").update(updates).eq("id", job_id).execute()
-            except Exception as e:
-                logger.error("Supabase update_job error: %s", e)
+            self.client.table("processing_jobs").update(updates).eq("id", job_id).execute()
+            return
 
-        with self.lock:
-            cur = self.conn.cursor()
-            set_parts = [f"{k} = ?" for k in updates.keys()]
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            set_clauses = [f"{k} = ?" for k in updates.keys()]
             vals = list(updates.values()) + [job_id]
-            cur.execute(f"UPDATE jobs SET {', '.join(set_parts)} WHERE id = ?", vals)
-            self.conn.commit()
+            conn.execute(f"UPDATE jobs SET {', '.join(set_clauses)} WHERE id = ?", vals)
 
-    # --- Clip Operations ---
-
-    def create_clip(self, clip_data: Dict[str, Any]) -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
-        clip_data["created_at"] = now
-        import json
-        hashtags_json = json.dumps(clip_data.get("hashtags", []))
-
+    def find_active_job_by_url(self, url: str) -> Optional[Dict[str, Any]]:
+        active_statuses = ["queued", "processing"]
         if self.has_supabase:
-            try:
-                row = {
-                    "id": clip_data["id"],
-                    "job_id": clip_data["job_id"],
-                    "title": clip_data["title"],
-                    "description": clip_data.get("description"),
-                    "hook": clip_data.get("hook"),
-                    "score": clip_data.get("score", 0),
-                    "start_time": clip_data["start_time"],
-                    "end_time": clip_data["end_time"],
-                    "duration": clip_data["duration"],
-                    "aspect_ratio": clip_data.get("aspect_ratio", "9:16"),
-                    "clip_url": clip_data.get("clip_url"),
-                    "storage_path": clip_data.get("storage_path"),
-                    "thumbnail_url": clip_data.get("thumbnail_url"),
-                    "captions": clip_data.get("captions"),
-                    "hashtags": clip_data.get("hashtags", []),
-                    "publishing_status": clip_data.get("publishing_status", "draft"),
-                    "created_at": now,
-                }
-                res = self.client.table("clips").insert(row).execute()
-                return res.data[0] if res.data else clip_data
-            except Exception as e:
-                logger.error("Supabase insert clip error: %s", e)
+            res = self.client.table("processing_jobs").select("*").eq("url", url).in_("status", active_statuses).limit(1).execute()
+            return res.data[0] if res.data else None
 
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO clips (id, job_id, title, description, hook, score, start_time, end_time, duration, aspect_ratio, clip_url, storage_path, thumbnail_url, captions, hashtags, publishing_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                clip_data["id"],
-                clip_data["job_id"],
-                clip_data["title"],
-                clip_data.get("description"),
-                clip_data.get("hook"),
-                clip_data.get("score", 0),
-                clip_data["start_time"],
-                clip_data["end_time"],
-                clip_data["duration"],
-                clip_data.get("aspect_ratio", "9:16"),
-                clip_data.get("clip_url"),
-                clip_data.get("storage_path"),
-                clip_data.get("thumbnail_url"),
-                clip_data.get("captions"),
-                hashtags_json,
-                clip_data.get("publishing_status", "draft"),
-                now,
-            ))
-            self.conn.commit()
-        return clip_data
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM jobs WHERE url = ? AND status IN ('queued', 'processing') LIMIT 1", (url,)).fetchone()
+            return dict(row) if row else None
 
-    def get_clip(self, clip_id: str) -> Optional[Dict[str, Any]]:
-        import json
-        if self.has_supabase:
-            try:
-                res = self.client.table("clips").select("*").eq("id", clip_id).execute()
-                if res.data:
-                    c = dict(res.data[0])
-                    if isinstance(c.get("hashtags"), str):
-                        try:
-                            c["hashtags"] = json.loads(c["hashtags"])
-                        except Exception:
-                            c["hashtags"] = []
-                    return c
-            except Exception as e:
-                logger.error("Supabase get_clip error: %s", e)
-
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM clips WHERE id = ?", (clip_id,))
-            row = cur.fetchone()
-            if row:
-                c = dict(row)
-                try:
-                    c["hashtags"] = json.loads(c.get("hashtags") or "[]")
-                except Exception:
-                    c["hashtags"] = []
-                return c
-        return None
-
-    def get_clips_for_job(self, job_id: str) -> List[Dict[str, Any]]:
-        import json
-        if self.has_supabase:
-            try:
-                res = self.client.table("clips").select("*").eq("job_id", job_id).order("score", desc=True).execute()
-                items = []
-                for row in res.data:
-                    c = dict(row)
-                    if isinstance(c.get("hashtags"), str):
-                        try:
-                            c["hashtags"] = json.loads(c["hashtags"])
-                        except Exception:
-                            c["hashtags"] = []
-                    items.append(c)
-                return items
-            except Exception as e:
-                logger.error("Supabase get_clips_for_job error: %s", e)
-
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM clips WHERE job_id = ? ORDER BY score DESC", (job_id,))
-            rows = cur.fetchall()
-            items = []
-            for r in rows:
-                c = dict(r)
-                try:
-                    c["hashtags"] = json.loads(c.get("hashtags") or "[]")
-                except Exception:
-                    c["hashtags"] = []
-                items.append(c)
-            return items
-
-    def update_clip(self, clip_id: str, updates: Dict[str, Any]):
-        import json
-        if "hashtags" in updates and isinstance(updates["hashtags"], list):
-            updates_sql = dict(updates)
-            updates_sql["hashtags"] = json.dumps(updates["hashtags"])
-        else:
-            updates_sql = updates
-
-        if self.has_supabase:
-            try:
-                self.client.table("clips").update(updates).eq("id", clip_id).execute()
-            except Exception as e:
-                logger.error("Supabase update_clip error: %s", e)
-
-        with self.lock:
-            cur = self.conn.cursor()
-            set_parts = [f"{k} = ?" for k in updates_sql.keys()]
-            vals = list(updates_sql.values()) + [clip_id]
-            cur.execute(f"UPDATE clips SET {', '.join(set_parts)} WHERE id = ?", vals)
-            self.conn.commit()
-
-    # --- Logs ---
-
+    # -------------------------------------------------------------------------
+    # Logs CRUD
+    # -------------------------------------------------------------------------
     def add_log(self, job_id: str, stage: str, message: str):
-        now = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
         if self.has_supabase:
             try:
                 self.client.table("processing_logs").insert({
                     "job_id": job_id,
                     "stage": stage,
                     "message": message,
-                    "created_at": now,
+                    "created_at": now_iso,
                 }).execute()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Failed to write log to Supabase: %s", e)
+            return
 
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                "INSERT INTO processing_logs (job_id, stage, message, created_at) VALUES (?, ?, ?, ?)",
-                (job_id, stage, message, now),
-            )
-            self.conn.commit()
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute("INSERT INTO job_logs (job_id, stage, message, created_at) VALUES (?, ?, ?, ?)",
+                         (job_id, stage, message, now_iso))
 
-    def get_logs_for_job(self, job_id: str) -> List[Dict[str, str]]:
+    # -------------------------------------------------------------------------
+    # Clips CRUD
+    # -------------------------------------------------------------------------
+    def create_clip(self, clip_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        clip_data["created_at"] = clip_data.get("created_at") or now_iso
+        clip_data["updated_at"] = now_iso
+        clip_data.setdefault("category_id", "gaming")
+
         if self.has_supabase:
+            payload = dict(clip_data)
+            res = self.client.table("generated_clips").insert(payload).execute()
+            return res.data[0] if res.data else clip_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO clips
+                (id, job_id, user_id, category_id, title, hook_sentence, virality_reason, score,
+                 start_time, end_time, duration, aspect_ratio, storage_path, storage_url,
+                 thumbnail_url, publishing_status, suggested_tags, is_quality_approved, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clip_data["id"],
+                    clip_data["job_id"],
+                    clip_data.get("user_id"),
+                    clip_data.get("category_id", "gaming"),
+                    clip_data["title"],
+                    clip_data.get("hook_sentence"),
+                    clip_data.get("virality_reason"),
+                    clip_data.get("score", 0),
+                    clip_data["start_time"],
+                    clip_data["end_time"],
+                    clip_data["duration"],
+                    clip_data.get("aspect_ratio", "9:16"),
+                    clip_data.get("storage_path"),
+                    clip_data["storage_url"],
+                    clip_data.get("thumbnail_url"),
+                    clip_data.get("publishing_status", "draft"),
+                    json.dumps(clip_data.get("suggested_tags", [])),
+                    1 if clip_data.get("is_quality_approved", True) else 0,
+                    clip_data["created_at"],
+                    clip_data["updated_at"],
+                ),
+            )
+        return clip_data
+
+    def get_clip(self, clip_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table("generated_clips").select("*").eq("id", clip_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
+            return self._format_clip_row(row) if row else None
+
+    def list_clips(self, limit: int = 20, offset: int = 0, category_id: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
+        if self.has_supabase:
+            query = self.client.table("generated_clips").select("*", count="exact")
+            if category_id:
+                query = query.eq("category_id", category_id)
+            res = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+            return res.data or [], res.count or 0
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            conds = ["category_id = ?"] if category_id else []
+            params = [category_id] if category_id else []
+            where = f"WHERE {' AND '.join(conds)}" if conds else ""
+
+            total = cur.execute(f"SELECT COUNT(*) FROM clips {where}", params).fetchone()[0]
+            rows = cur.execute(f"SELECT * FROM clips {where} ORDER BY created_at DESC LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
+            return [self._format_clip_row(r) for r in rows], total
+
+    def update_clip(self, clip_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if self.has_supabase:
+            res = self.client.table("generated_clips").update(updates).eq("id", clip_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            set_clauses = []
+            vals = []
+            for k, v in updates.items():
+                set_clauses.append(f"{k} = ?")
+                vals.append(json.dumps(v) if isinstance(v, (list, dict)) else v)
+            vals.append(clip_id)
+            conn.execute(f"UPDATE clips SET {', '.join(set_clauses)} WHERE id = ?", vals)
+        return self.get_clip(clip_id)
+
+    def _format_clip_row(self, row: Optional[sqlite3.Row]) -> Dict[str, Any]:
+        if not row:
+            return {}
+        d = dict(row)
+        if isinstance(d.get("suggested_tags"), str):
             try:
-                res = self.client.table("processing_logs").select("*").eq("job_id", job_id).order("id", desc=False).execute()
-                return [{"timestamp": r["created_at"], "stage": r["stage"], "message": r["message"]} for r in res.data]
+                d["suggested_tags"] = json.loads(d["suggested_tags"])
             except Exception:
-                pass
+                d["suggested_tags"] = []
+        d["is_quality_approved"] = bool(d.get("is_quality_approved", 1))
+        return d
 
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT stage, message, created_at FROM processing_logs WHERE job_id = ? ORDER BY id ASC", (job_id,))
-            return [{"timestamp": r["created_at"], "stage": r["stage"], "message": r["message"]} for r in cur.fetchall()]
+    # -------------------------------------------------------------------------
+    # Channels CRUD
+    # -------------------------------------------------------------------------
+    def list_channels(self) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table("connected_channels").select("*").execute()
+            return res.data or []
 
-    # --- Channels ---
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM channels ORDER BY created_at DESC").fetchall()
+            return [dict(r) for r in rows]
 
     def create_channel(self, channel_data: Dict[str, Any]) -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
-        channel_data["created_at"] = now
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO channels (id, channel_url, channel_name, auto_clip_new_videos, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                channel_data["id"],
-                channel_data["channel_url"],
-                channel_data["channel_name"],
-                1 if channel_data.get("auto_clip_new_videos") else 0,
-                now,
-            ))
-            self.conn.commit()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        channel_data["created_at"] = now_iso
+
+        if self.has_supabase:
+            self.client.table("connected_channels").insert(channel_data).execute()
+            return channel_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                "INSERT INTO channels (id, user_id, channel_name, channel_url, auto_clip_new_videos, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    channel_data["id"],
+                    channel_data.get("user_id"),
+                    channel_data.get("channel_name", "Channel"),
+                    channel_data.get("channel_url", ""),
+                    1 if channel_data.get("auto_clip_new_videos", False) else 0,
+                    now_iso,
+                ),
+            )
         return channel_data
 
-    def list_channels(self) -> List[Dict[str, Any]]:
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM channels ORDER BY created_at DESC")
-            return [dict(r) for r in cur.fetchall()]
 
-
-# Singleton database instance
 db = DatabaseClient()

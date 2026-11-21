@@ -1,15 +1,30 @@
-# GTA 6 Shorts Engine — Production Backend & Render Deployment
+# Multi-Category Viral Content Engine & Shorts Production Backend
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python)](https://python.org)
 [![Supabase](https://img.shields.io/badge/Supabase-Database%20%26%20Storage-3ECF8E?style=flat-square&logo=supabase)](https://supabase.com)
 [![Redis RQ](https://img.shields.io/badge/Queue-Redis%20RQ-DC382D?style=flat-square&logo=redis)](https://python-rq.org)
+[![Buffer](https://img.shields.io/badge/Publishing-Buffer%20OAuth%202.0-000000?style=flat-square)](https://buffer.com)
 [![Render](https://img.shields.io/badge/Deploy-Render%20Blueprint-46E3B7?style=flat-square&logo=render)](https://render.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A production-grade, asynchronous video processing engine engineered for generating high-engagement, viral vertical shorts (9:16) from long-form YouTube content and authorized video sources. Powered by Google Gemini 2.5 Flash / OpenAI for highlight detection, Whisper speech-to-text transcription, FFmpeg vertical framing, Supabase cloud persistence, Redis RQ background workers, and automated YouTube publishing workflows.
+A scalable, secure, production-grade backend engine engineered for multi-category viral short-form video discovery, AI-assisted highlight generation, vertical 9:16 video production, and social publishing via Buffer (TikTok, YouTube Shorts, Instagram Reels). Fully integrated with Supabase database & storage, Redis/RQ background worker architecture, and designed to connect with Lovable web dashboards.
 
-Connected natively to Lovable web dashboards.
+---
+
+## Table of Contents
+1. [Architecture Overview](#1-architecture-overview)
+2. [Multi-Category Content Engine](#2-multi-category-content-engine)
+3. [Content Discovery & Rights Management](#3-content-discovery--rights-management)
+4. [Security & Isolation Model](#4-security--isolation-model)
+5. [Buffer Social Publishing Integration](#5-buffer-social-publishing-integration)
+6. [Analytics & Scheduling Engine](#6-analytics--scheduling-engine)
+7. [Local Setup & Development](#7-local-setup--development)
+8. [Environment Variables Reference](#8-environment-variables-reference)
+9. [Supabase Setup & SQL Migrations](#9-supabase-setup--sql-migrations)
+10. [Render Cloud Deployment](#10-render-cloud-deployment)
+11. [Lovable Dashboard Integration & API Contracts](#11-lovable-dashboard-integration--api-contracts)
+12. [Troubleshooting & Verification](#12-troubleshooting--verification)
 
 ---
 
@@ -18,9 +33,9 @@ Connected natively to Lovable web dashboards.
 ```
                       ┌───────────────────────────────────────────────┐
                       │            Lovable Frontend App               │
-                      │  (Dashboard, Queue, Player, Approval Flow)   │
+                      │  (Multi-Category Dashboard, Queue, Approval)  │
                       └───────────────────────┬───────────────────────┘
-                                              │ REST API (HTTPS + X-API-Key)
+                                              │ REST API (HTTPS + X-API-Key / Supabase JWT)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 │                                Render Deployment Cloud                                  │
@@ -28,339 +43,204 @@ Connected natively to Lovable web dashboards.
 │  ┌────────────────────────────────┐                 ┌────────────────────────────────┐  │
 │  │   gta6-shorts-engine (Web)     │                 │   gta6-shorts-worker (Worker)  │  │
 │  │   - FastAPI HTTP Server        │                 │   - Dedicated high-RAM/CPU    │  │
-│  │   - Pydantic Validation        │                 │   - FFmpeg 8.x + Whisper       │  │
-│  │   - SSRF Protection            │                 │   - Gemini AI Highlights       │  │
-│  │   - Job & Auth Management      │                 │   - Dynamic Social Metadata    │  │
+│  │   - Pydantic v2 Validation     │                 │   - FFmpeg 8.x + Whisper       │  │
+│  │   - SSRF & Safe Host Filtering │                 │   - Gemini 2.5 Flash Highlights│  │
+│  │   - Rate Limiting & Auth Gates │                 │   - Vertical 9:16 Crop/Reframe │  │
 │  └───────────────┬────────────────┘                 └────────────────┬───────────────┘  │
 │                  │                                                   │                  │
 │                  │           ┌────────────────────────┐              │                  │
 │                  └──────────►│  Render Redis Queue    │◄─────────────┘                  │
-│                     Enqueue  │  (gta6_shorts default) │   Dequeue & Process             │
+│                     Enqueue  │  (Redis RQ gta6_shorts)│   Dequeue & Process             │
 │                              └────────────────────────┘                                 │
 └──────────────────────────────────────────┬──────────────────────────────────────────────┘
                                            │
                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                              External Cloud Services                                    │
+│                            External Services & Storage                                  │
 │                                                                                         │
-│  ┌───────────────────────────────────────────┐   ┌───────────────────────────────────┐  │
-│  │           Supabase Cloud                  │   │        Google / AI APIs           │  │
-│  │   - Postgres: jobs, clips, logs           │   │   - Gemini 2.5 Flash / OpenAI     │  │
-│  │   - Storage: 9:16 rendered MP4 shorts     │   │   - YouTube Data API v3 (OAuth)   │  │
-│  │   - Row Level Security (RLS)              │   │     (Private-by-default shorts)   │  │
-│  └───────────────────────────────────────────┘   └───────────────────────────────────┘  │
+│  ┌───────────────────────────────┐                  ┌────────────────────────────────┐  │
+│  │   Supabase Cloud Platform     │                  │   Buffer Publishing API        │  │
+│  │   - PostgreSQL + RLS Security │                  │   - TikTok Direct Publishing   │  │
+│  │   - Private S3 Video Storage  │                  │   - YouTube Shorts Channels    │  │
+│  │   - Signed CDN Download URLs  │                  │   - Multi-Channel Scheduling   │  │
+│  └───────────────────────────────┘                  └────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Architectural Principles:
-1. **Separation of Concerns**: FastAPI handlers respond in `<50ms` and never perform heavy video encoding. All downloads, AI calls, Whisper transcriptions, and FFmpeg renders are executed asynchronously in isolated background worker processes.
-2. **SSRF & Input Hardening**: Strict URL allowlisting permits only verified YouTube domains (`youtube.com`, `youtu.be`) and rejects arbitrary local file paths, private IP addresses (`10.0.0.0/8`, `192.168.0.0/16`, `169.254.169.254`), and non-HTTP protocols.
-3. **Stateless Compute with Cloud Persistence**: Neither the web service nor the background worker relies on ephemeral disk for permanent storage. Rendered clips and thumbnails are immediately uploaded to Supabase Storage, and processing metadata is saved to PostgreSQL.
-4. **Resilient Failovers**: If Supabase or Redis is temporarily unavailable during local development or unit testing, the system automatically uses an ACID-compliant SQLite fallback and in-process threaded job execution.
+---
+
+## 2. Multi-Category Content Engine
+
+The engine is completely decoupled from GTA 6-only logic and supports custom and pre-configured viral entertainment categories:
+
+| Category ID | Display Name | Core Content Profile |
+| :--- | :--- | :--- |
+| `gaming` | Gaming & Gaming Discoveries | GTA 6 trailers/gameplay, competitive clutches, unexpected gaming physics |
+| `viral_entertainment` | Viral Entertainment | Unexpected real-life moments, reactions, comedy hooks, human interest |
+| `animals_nature` | Animals & Wildlife | Cute moments, heroic rescues, rare wildlife interactions, nature spectacles |
+| `tech_ai` | Technology & Futuristic AI | Emerging AI breakthroughs, robotics demos, gadgets, future tech |
+| `sports` | Sports & Athletic Feats | Unbelievable goals, clutch buzzer-beaters, extreme stunts, athletic drama |
+
+Categories can be dynamically queried or created at `/api/v1/categories` without touching core video rendering code.
 
 ---
 
-## 2. Local Setup Instructions
+## 3. Content Discovery & Rights Management
+
+Every content item processed through the system must be verified against legal rights compliance gates:
+
+- **Pending Verification**: Discovered content cannot enter video rendering or background queues until rights are recorded.
+- **Authorized for Editing**: Rights holder has provided permission to create short-form transformative derivative content.
+- **Authorized Platforms**: Restricted licensing allowing publication only on approved channels (e.g., TikTok only).
+- **Rejected**: Banned from ingestion and production.
+
+Content deduplication is enforced by tracking source hashes, canonical URLs, and channel identifiers.
+
+---
+
+## 4. Security & Isolation Model
+
+1. **Production Fail-Closed Enforcement**: If `ENGINE_API_KEY` or `SUPABASE_SERVICE_ROLE_KEY` is missing in `ENVIRONMENT=production`, the application immediately halts and refuses requests rather than allowing unauthenticated access.
+2. **SSRF & Private Network Defense**:
+   - Rejects loopback (`127.0.0.1`), private subnets (`10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`), and AWS/GCP link-local metadata addresses (`169.254.169.254`).
+   - Disallows non-HTTP/HTTPS schemes (`file://`, `ftp://`).
+   - Strict redirect re-validation.
+3. **CORS Hardening**: Strict origin matching based on `ALLOWED_CORS_ORIGINS` (including Lovable preview domains); wildcards (`*`) with credentials enabled are strictly prohibited.
+4. **Row Level Security (RLS)**: Public anonymous access to database tables (`processing_jobs`, `generated_clips`, `content_sources`) is revoked. Service role holds backend administrative rights while authenticated users can only view their own records.
+5. **Private Media Storage**: Video clips and high-resolution assets are stored in private Supabase buckets, accessed exclusively through expiring signed URLs.
+
+---
+
+## 5. Buffer Social Publishing Integration
+
+Buffer serves as the official social distribution layer:
+- **Authentication**: Connect via OAuth 2.0 (`/api/v1/publishing/buffer/connect`).
+- **Channel Discovery**: Fetch linked TikTok and YouTube Shorts channels (`/api/v1/publishing/channels`).
+- **Scheduling**: Post clips with platform-tailored hooks, descriptions, and hashtags (`/api/v1/clips/{clip_id}/schedule`).
+- **Manual Gate**: Clips remain in `awaiting_approval` status until explicitly approved by human reviewers.
+
+---
+
+## 6. Analytics & Scheduling Engine
+
+- **Automated Production Targets**: Set daily production goals (default: 15–20 videos per day) with category-weighted quotas and active publishing windows (e.g., 11:00–14:00 and 17:00–22:00 UTC).
+- **Metric Verification**: Tracks `views`, `likes`, `comments`, `shares`, `reach`, and `completion_rate`. Missing or un-synced metrics are marked as `unavailable` or `pending_sync` rather than fabricated with synthetic numbers.
+- **Feedback Loops**: Historical clip performance identifies top-performing categories and formats to guide future automated batching.
+
+---
+
+## 7. Local Setup & Development
 
 ### Prerequisites
 - Python 3.11+
-- FFmpeg 6.0+ installed and available on `PATH`
-- Redis (optional for local queue testing, defaults to thread fallback if absent)
+- FFmpeg 6.0+ (`ffmpeg`, `ffprobe`) installed on your system PATH
+- Redis server (or Docker Redis)
 
-### Step 1: Clone and Create Virtual Environment
+### Installation
 ```bash
+# Clone the repository
 git clone https://github.com/Flames-ui/gta6-shorts-engine.git
 cd gta6-shorts-engine
 
+# Create and activate virtual environment
 python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+source venv/bin/activate
 
-### Step 2: Install Dependencies
-```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### Step 3: Configure Environment Variables
-```bash
+# Copy environment template
 cp .env.example .env
-# Edit .env and supply your GEMINI_API_KEY, SUPABASE_URL, and ENGINE_API_KEY
 ```
 
-### Step 4: Run the Services Locally
+### Running Tests
+```bash
+PYTHONPATH=. pytest tests/ -v
+```
 
-**Option A: Run the FastAPI Web Server**
+### Starting the API Server
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-Access the interactive Swagger documentation at `http://localhost:8000/docs`.
 
-**Option B: Run the Background Worker**
+### Starting the Background Worker
 ```bash
-python3 -m app.worker
-```
-
-**Option C: Run the Original CLI**
-```bash
-# Local mode with Gemini 2.5 Flash highlight extraction
-python3 main.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
-    --mode local \
-    --llm-provider gemini \
-    --num-clips 3 \
-    --aspect-ratio 9:16
-```
-
-### Step 5: Run Automated Tests
-```bash
-pytest -v
+python -m app.worker
 ```
 
 ---
 
-## 3. Environment Variables Reference
+## 8. Environment Variables Reference
 
-| Variable | Required | Description | Example |
-|---|---|---|---|
-| `ENGINE_API_KEY` | **Yes (Prod)** | Secret API key required in `X-API-Key` or `Authorization: Bearer` header. | `sec_gta6_live_98a7bc...` |
-| `GEMINI_API_KEY` | **Yes** (if using Gemini) | Google Gemini API key for intelligent highlight ranking & social copy. | `AIzaSy...` |
-| `OPENAI_API_KEY` | Optional | OpenAI API key (used if `LLM_PROVIDER=openai`). | `sk-proj-...` |
-| `LLM_PROVIDER` | No | Default highlight ranking LLM: `gemini` or `openai` (default: `gemini`). | `gemini` |
-| `SUPABASE_URL` | **Yes (Prod)** | Your Supabase project URL. | `https://xyzproject.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY` | **Yes (Prod)** | Supabase service-role key for backend database & storage access. | `eyJhbGciOi...` |
-| `SUPABASE_STORAGE_BUCKET` | No | Supabase Storage bucket for rendered MP4 clips (default: `shorts`). | `shorts` |
-| `REDIS_URL` | **Yes (Prod)** | Redis connection string for background queue. | `redis://default:pass@redis.render.com:6379` |
-| `CORS_ORIGINS` | No | Comma-separated list of allowed frontend dashboard origins. | `http://localhost:5173,https://*.lovable.app` |
-| `MAX_VIDEO_DURATION_SECONDS`| No | Hard cutoff for input video duration (default: 7200 = 2 hours). | `7200` |
-| `MAX_CONCURRENT_JOBS` | No | Worker concurrency limit (default: `2`). | `2` |
-| `JOB_TIMEOUT_SECONDS` | No | Timeout before a stuck job is aborted (default: `1800` = 30m). | `1800` |
-| `YOUTUBE_CLIENT_ID` | Optional | Google Cloud OAuth 2.0 Client ID for YouTube Shorts upload. | `123456789.apps.googleusercontent.com` |
-| `YOUTUBE_CLIENT_SECRET` | Optional | Google Cloud OAuth 2.0 Client Secret. | `GOCSPX-...` |
-| `YOUTUBE_REDIRECT_URI` | Optional | OAuth callback redirect URL. | `https://engine.onrender.com/api/v1/auth/youtube/callback` |
-| `ENVIRONMENT` | No | `production`, `development`, or `test`. | `production` |
-| `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, or `ERROR` (default: `INFO`). | `INFO` |
+| Variable | Required | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `ENVIRONMENT` | Yes | `development` | Set to `production` for Render deployment |
+| `ENGINE_API_KEY` | Yes (Prod) | - | Shared secret for backend API authentication |
+| `GEMINI_API_KEY` | Recommended | - | Google Gemini AI key for highlight detection |
+| `SUPABASE_URL` | Yes (Prod) | - | Supabase Project URL (`https://xyz.supabase.co`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes (Prod) | - | Supabase backend service role key |
+| `SUPABASE_STORAGE_BUCKET` | No | `generated_clips` | Bucket name for persistent clip storage |
+| `REDIS_URL` | Yes (Prod) | `redis://localhost:6379/0`| Connection URL for Redis/RQ queue |
+| `BUFFER_CLIENT_ID` | For Buffer | - | Buffer OAuth App Client ID |
+| `BUFFER_CLIENT_SECRET` | For Buffer | - | Buffer OAuth App Client Secret |
+| `BUFFER_REDIRECT_URI` | For Buffer | - | Callback URL for Buffer OAuth |
+| `ALLOWED_CORS_ORIGINS` | No | Lovable domains | Comma-separated list of approved frontend origins |
 
 ---
 
-## 4. Supabase Setup & SQL Migrations
+## 9. Supabase Setup & SQL Migrations
 
-The engine uses Supabase for database persistence and public video asset storage.
+Run the SQL migration in `supabase/migrations/20261121010000_multi_category_and_security.sql` in your Supabase SQL Editor.
 
-### 1. Apply Database Schema
-Execute the SQL migration located in `supabase/migrations/20261121000000_initial_schema.sql` in your **Supabase SQL Editor**:
-- Creates `jobs`, `clips`, `source_videos`, and `job_logs` tables.
-- Creates optimized indexes on `url`, `status`, `job_id`, and `created_at`.
-- Sets up Row Level Security (RLS) policies allowing secure backend read/write access.
-
-### 2. Configure Supabase Storage Bucket
-1. In the Supabase dashboard, navigate to **Storage**.
-2. Create a new bucket named **`shorts`** (or the value set in `SUPABASE_STORAGE_BUCKET`).
-3. Set bucket access to **Public** so generated clip URLs can be streamed by the Lovable dashboard.
+Key tables provisioned with Row Level Security:
+- `categories`: Multi-category taxonomy, AI prompts, and scoring weights.
+- `content_sources` & `source_permissions`: Discovery sources and copyright authorization gates.
+- `discovered_content`: Discovered content feed awaiting processing.
+- `processing_jobs` & `processing_logs`: Real-time job status and execution telemetry.
+- `generated_clips` & `clip_metadata`: 9:16 vertical video clips, signed URLs, and hooks.
+- `publishing_accounts`, `connected_channels`, `publishing_queue`: Buffer integration records.
+- `platform_analytics` & `production_schedules`: Engagement tracking and daily quota rules.
 
 ---
 
-## 5. Render Deployment Instructions
+## 10. Render Cloud Deployment
 
-The repository includes a ready-to-deploy `render.yaml` Blueprint specification defining two isolated services and a managed Redis instance.
+The repository includes a ready-to-deploy `render.yaml` Blueprint configuring three linked services:
 
-### Automatic Blueprint Deployment
-1. Log in to [Render](https://dashboard.render.com/).
-2. Click **New +** → **Blueprint**.
-3. Connect your GitHub repository `Flames-ui/gta6-shorts-engine`.
-4. Render will parse `render.yaml` and configure:
-   - **`gta6-shorts-engine`** (Web Service):
-     - Docker runtime using the repository `Dockerfile`.
-     - Command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2`
-     - Health Check Path: `/health`
-   - **`gta6-shorts-worker`** (Background Worker):
-     - Docker runtime with FFmpeg 8.x, Python 3.11, and Whisper pre-installed.
-     - Plan: `standard` (2 GB RAM, 1 CPU) or higher for video encoding.
-     - Command: `python3 -m app.worker`
-   - **`gta6-shorts-redis`** (Redis):
-     - Private networking queue for reliable job dispatching.
-5. Provide the required secrets in the Render dashboard:
-   - `ENGINE_API_KEY`
-   - `GEMINI_API_KEY`
-   - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-6. Click **Apply**.
+1. **`gta6-shorts-engine`** (Web Service):
+   - Fast lightweight FastAPI application.
+   - Handles API traffic, validation, Supabase synchronization, and queue dispatch.
+   - Health check path: `/health`.
+
+2. **`gta6-shorts-worker`** (Background Worker):
+   - High-CPU/RAM container with pre-installed FFmpeg and Whisper models.
+   - Dequeues jobs from Redis and executes AI highlighting, audio extraction, vertical cropping, and video validation.
+
+3. **`gta6-shorts-redis`** (Private Redis):
+   - High-performance job queue for Redis RQ.
+
+To deploy, connect your GitHub repository to [Render](https://render.com) and deploy the Blueprint directly via `render.yaml`.
 
 ---
 
-## 6. Complete API Reference
+## 11. Lovable Dashboard Integration & API Contracts
 
-All protected endpoints require authentication via:
-`X-API-Key: <ENGINE_API_KEY>` or `Authorization: Bearer <ENGINE_API_KEY>`
+Lovable dashboards connect to the backend using standard HTTPS requests with the `X-API-Key: <ENGINE_API_KEY>` header:
 
-### 1. Health & Status
-#### `GET /health`
-Liveness and readiness probe for load balancers and Render health checks.
-```json
-{
-  "status": "healthy",
-  "app": "GTA 6 Shorts Engine",
-  "version": "1.0.0",
-  "timestamp": "2026-11-21T12:00:00Z",
-  "redis": "connected",
-  "supabase": "connected"
-}
-```
-
-#### `GET /api/v1/status`
-Engine operational status, queue depth, and worker count.
-```json
-{
-  "status": "operational",
-  "queue_depth": 1,
-  "active_workers": 2,
-  "gemini_configured": true,
-  "supabase_configured": true,
-  "youtube_oauth_configured": false
-}
-```
-
-### 2. Job Management
-#### `POST /api/v1/jobs`
-Submit a new video processing job. Duplicate URLs with active jobs return `409 Conflict` unless `"force": true` is specified.
-```json
-// Request Body
-{
-  "url": "https://www.youtube.com/watch?v=QdBZY2fkU-0",
-  "num_clips": 3,
-  "aspect_ratio": "9:16",
-  "mode": "local",
-  "llm_provider": "gemini",
-  "gta_preset": true,
-  "force": false
-}
-
-// Response (201 Created)
-{
-  "id": "job_a1b2c3d4e5f6",
-  "url": "https://www.youtube.com/watch?v=QdBZY2fkU-0",
-  "status": "queued",
-  "stage": "pending",
-  "progress": 0,
-  "num_clips": 3,
-  "video_title": null,
-  "video_duration": null,
-  "error": null,
-  "mode": "local",
-  "llm_provider": "gemini",
-  "gta_preset": true,
-  "retry_count": 0,
-  "created_at": "2026-11-21T12:01:00Z",
-  "clips": [],
-  "logs": []
-}
-```
-
-#### `GET /api/v1/jobs/{job_id}`
-Retrieve real-time processing status, progress percentage, log events, and generated clips.
-```json
-{
-  "id": "job_a1b2c3d4e5f6",
-  "status": "processing",
-  "stage": "transcribing",
-  "progress": 35,
-  "video_title": "Grand Theft Auto VI — Official Trailer 1",
-  "video_duration": 91.0,
-  "clips": [],
-  "logs": [
-    {"timestamp": "2026-11-21T12:01:05Z", "stage": "downloading", "message": "Source video acquired"},
-    {"timestamp": "2026-11-21T12:01:25Z", "stage": "transcribing", "message": "Whisper speech-to-text complete"}
-  ]
-}
-```
-
-#### `GET /api/v1/jobs`
-List jobs with pagination and status filtering.
-```
-GET /api/v1/jobs?limit=20&offset=0&status=completed
-```
-
-#### `POST /api/v1/jobs/{job_id}/cancel`
-Cancel an active queued or processing job.
-
-#### `POST /api/v1/jobs/{job_id}/retry`
-Re-enqueue a failed or cancelled job.
-
-### 3. Generated Clips & Publishing
-#### `GET /api/v1/clips/{clip_id}`
-Retrieve a single generated Short with AI-generated titles, hooks, viral scores, and storage stream URL.
-```json
-{
-  "id": "clip_789abc",
-  "job_id": "job_a1b2c3d4e5f6",
-  "title": "GTA 6 Vice City Beach Scene Breakdown",
-  "hook_sentence": "Look closely at the water physics in this scene!",
-  "score": 94,
-  "start_time": 12.5,
-  "end_time": 42.5,
-  "duration": 30.0,
-  "storage_url": "https://xyz.supabase.co/storage/v1/object/public/shorts/clips/clip_789abc.mp4",
-  "aspect_ratio": "9:16",
-  "publishing_status": "draft",
-  "suggested_tags": ["GTA6", "GrandTheftAuto", "Shorts", "ViceCity", "Gaming"]
-}
-```
-
-#### `POST /api/v1/clips/{clip_id}/approve`
-Human-in-the-loop approval endpoint. Must be called before any clip can be published.
-```json
-{
-  "approved_for_publishing": true,
-  "custom_title": "Official GTA 6 Vice City Stunts #Shorts",
-  "custom_description": "Insane GTA 6 moments captured in 4K 60FPS.",
-  "custom_hashtags": ["GTA6", "Shorts", "Gaming"]
-}
-```
-
-#### `POST /api/v1/clips/{clip_id}/publish`
-Uploads the approved clip to YouTube as a **private-by-default** Short. Never releases clips publicly without explicit human intervention.
+### Key Endpoints for Lovable:
+- `GET /health`: Service and dependency status.
+- `GET /api/v1/categories`: Retrieve all categories for selection dropdowns.
+- `POST /api/v1/jobs`: Create video processing job (`url`, `category_id`, `num_clips`, `aspect_ratio`).
+- `GET /api/v1/jobs/{job_id}`: Poll job progress and status (`queued`, `downloading`, `transcribing`, `analyzing`, `rendering`, `completed`, `failed`).
+- `GET /api/v1/clips/{clip_id}`: Retrieve clip details, signed video URL, and generated hooks.
+- `POST /api/v1/clips/{clip_id}/approve`: Mark a clip as approved for social publishing.
+- `POST /api/v1/clips/{clip_id}/schedule`: Submit approved clip to Buffer for scheduled release.
+- `GET /api/v1/analytics/overview`: High-level multi-platform performance metrics.
 
 ---
 
-## 7. Lovable Dashboard Integration Guide
+## 12. Troubleshooting & Verification
 
-The GTA 6 Shorts Engine is structured for seamless integration with Lovable-built frontend applications.
-
-### Recommended UI Screens & Views:
-1. **Source Channel Monitor & Ingestion**:
-   - URL input card with immediate regex / domain feedback.
-   - Presets for clip counts (1, 3, 5) and GTA-virality tuning.
-2. **Processing Pipeline & Live Progress Bar**:
-   - Visual step indicator: `Pending` → `Downloading` → `Transcribing` → `AI Analysis` → `FFmpeg Crop` → `Uploading` → `Completed`.
-   - Polls `GET /api/v1/jobs/{job_id}` at a 3-second interval until terminal status.
-3. **Shorts Gallery & Video Player**:
-   - 9:16 vertical video player rendering `storage_url`.
-   - Card displays viral score badge (0–100), hook sentence, and suggested hashtags.
-4. **Publishing Approval Workflow**:
-   - Editable fields for Title, Description, and Tags.
-   - "Approve for Publishing" action button triggers `POST /api/v1/clips/{clip_id}/approve`.
-   - "Publish to YouTube" triggers `POST /api/v1/clips/{clip_id}/publish`.
-
----
-
-## 8. YouTube Publishing & Compliance Architecture
-
-- **Private-by-Default Policy**: All automated publishing requests explicitly set `"privacyStatus": "private"`. No clip is ever made public automatically.
-- **Copyright & Compliance Notice**: The backend enforces modular authorized source ingestion. Utilizing automated tooling does not override YouTube's Terms of Service or third-party intellectual property rights. Users must possess appropriate rights or licenses for all processed media.
-- **OAuth Token Handling**: YouTube Data API v3 OAuth refresh tokens are stored securely in Supabase with database-level encryption and are never returned in client API responses.
-
----
-
-## 9. Troubleshooting & Common Issues
-
-| Issue | Cause | Solution |
-|---|---|---|
-| `503 Service Unavailable` on health check | Redis connection failed | Verify `REDIS_URL` in environment variables or check private networking hostname. |
-| `401 Unauthorized` on API requests | Missing or wrong API key | Pass `X-API-Key: <ENGINE_API_KEY>` header. |
-| `400 Bad Request: URL must be an approved YouTube domain` | Input URL failed security check | Only valid HTTPS YouTube URLs (`youtube.com`, `youtu.be`) are accepted. |
-| Worker OOM (Out of Memory) crash | Render worker instance memory too low | Increase Background Worker plan to at least 2 GB RAM in `render.yaml` or Render dashboard. |
-| Gemini highlight detection error | Missing or invalid Gemini API key | Ensure `GEMINI_API_KEY` is set and has active quota. |
-| SQLite locking errors in local testing | Multiple processes accessing SQLite | Concurrency locking is handled via `threading.RLock()`. In production, configure Supabase PostgreSQL. |
-
----
-
-## 10. License
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+- **Redis Offline in Development**: In development or test mode, the system safely falls back to local in-process execution for developer convenience. In production, it fails closed to protect workload integrity.
+- **Missing AI Key**: If Gemini/OpenAI API keys are not supplied, the pipeline activates heuristic highlight fallback mode to allow end-to-end rendering test execution without crashing.
+- **Clip Validation Failures**: Videos failing minimum length, audio presence, or resolution checks are logged and quarantined rather than published.

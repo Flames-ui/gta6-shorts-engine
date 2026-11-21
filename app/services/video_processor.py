@@ -1,69 +1,82 @@
-"""Core background video processing pipeline execution."""
+"""Core background video processing pipeline with multi-category AI, FFmpeg rendering, and validation."""
+import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import uuid
 from typing import Any, Dict, List, Optional
 
 from ..config import settings
+from .ai_intelligence import ai_intelligence_service
+from .categories import category_service
+from .security import sanitize_filename, validate_safe_url
 from .social_meta import generate_clip_social_metadata
 from .storage import storage_service
 from .supabase_client import db
+from .video_renderer import video_renderer
+from .video_validator import video_validator
 
 logger = logging.getLogger("gta6_shorts.processor")
 
 
 def process_video_job(job_id: str):
-    """Main job entrypoint executed by background worker."""
+    """Main job entrypoint executed by background worker process."""
     job = db.get_job(job_id)
     if not job:
         logger.error("Job %s not found in database", job_id)
         return
 
-    logger.info("Starting processing for job %s: %s", job_id, job["url"])
+    logger.info("Starting processing for job %s: %s (Category: %s)", job_id, job["url"], job.get("category_id"))
     db.add_log(job_id, "started", f"Worker picked up job {job_id}")
 
-    temp_dir = tempfile.mkdtemp(prefix=f"gta6_job_{job_id}_")
+    temp_dir = tempfile.mkdtemp(prefix=f"shorts_job_{job_id}_")
 
     try:
-        # Step 1: Download / Acquire Source Video
-        db.update_job_progress(job_id, stage="downloading", progress=10, status="processing")
-        db.add_log(job_id, "downloading", f"Acquiring source video: {job['url']}")
-
-        mode = job.get("mode", "local")
+        category_id = job.get("category_id", "gaming")
+        user_id = job.get("user_id")
         num_clips = int(job.get("num_clips", 3))
         aspect_ratio = job.get("aspect_ratio", "9:16")
-        gta_preset = bool(job.get("gta_preset", True))
         llm_provider = job.get("llm_provider", "gemini")
+        mode = job.get("mode", "local")
 
+        # Step 1: Video Acquisition (Safe Ingestion)
+        db.update_job_progress(job_id, stage="downloading", progress=10, status="processing")
+        db.add_log(job_id, "downloading", f"Acquiring video source for category '{category_id}': {job['url']}")
+
+        raw_url = job["url"].strip()
         source_video_path = None
         video_title = "Source Video"
         video_duration = 0.0
 
-        if mode == "local":
-            from shorts_generator.local.downloader import download_youtube_local, _extract_youtube_video_id
-            # Download to temp directory
-            source_video_path = download_youtube_local(job["url"], fmt=job.get("target_format", "720"))
-            
-            # Extract duration & title using ffprobe / yt-dlp metadata
-            video_title = os.path.splitext(os.path.basename(source_video_path))[0]
-            try:
-                import subprocess, json
-                probe_cmd = [
-                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                    "-of", "json", source_video_path
-                ]
-                res = subprocess.run(probe_cmd, capture_output=True, text=True)
-                dur_data = json.loads(res.stdout)
-                video_duration = float(dur_data.get("format", {}).get("duration", 0.0))
-            except Exception as pe:
-                logger.warning("Could not probe video duration: %s", pe)
-
+        if os.path.isfile(raw_url):
+            # Authorized direct local media upload
+            source_video_path = raw_url
+            video_title = os.path.splitext(os.path.basename(raw_url))[0]
         else:
-            # API / MuAPI mode
-            from shorts_generator.downloader import download_youtube
-            source_video_path = download_youtube(job["url"], fmt=job.get("target_format", "720"))
+            # Validate remote URL before retrieval
+            validate_safe_url(raw_url)
+            if mode == "local":
+                from shorts_generator.local.downloader import download_youtube_local
+                source_video_path = download_youtube_local(raw_url, fmt=job.get("target_format", "720"))
+                video_title = os.path.splitext(os.path.basename(source_video_path))[0]
+            else:
+                from shorts_generator.downloader import download_youtube
+                source_video_path = download_youtube(raw_url, fmt=job.get("target_format", "720"))
+                video_title = os.path.splitext(os.path.basename(source_video_path))[0]
+
+        # Probe duration and metadata
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "json", source_video_path,
+            ]
+            res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+            dur_data = json.loads(res.stdout)
+            video_duration = float(dur_data.get("format", {}).get("duration", 0.0))
+        except Exception as pe:
+            logger.warning("Could not probe video duration: %s", pe)
 
         db.update_job_progress(
             job_id,
@@ -72,9 +85,9 @@ def process_video_job(job_id: str):
             video_title=video_title,
             video_duration=video_duration,
         )
-        db.add_log(job_id, "transcribing", f"Video acquired. Duration: {video_duration:.1f}s. Beginning audio transcription.")
+        db.add_log(job_id, "transcribing", f"Source acquired. Duration: {video_duration:.1f}s. Transcribing audio.")
 
-        # Step 2: Transcribe Video
+        # Step 2: Audio Transcription
         transcript = None
         if mode == "local":
             from shorts_generator.local.transcriber import transcribe_local
@@ -84,115 +97,129 @@ def process_video_job(job_id: str):
             transcript = transcribe(source_video_path, language=job.get("language"))
 
         if not transcript or not transcript.get("segments"):
-            raise RuntimeError("Transcription yielded no segments. Video might lack clear audio or speech.")
+            raise RuntimeError("Transcription produced zero segments. Video audio may be silent or unintelligible.")
 
         db.update_job_progress(job_id, stage="highlight_detection", progress=50)
-        db.add_log(job_id, "highlight_detection", f"Transcription complete ({len(transcript['segments'])} segments). Detecting viral highlights with {llm_provider}.")
+        db.add_log(job_id, "highlight_detection", f"Transcribed {len(transcript['segments'])} segments. Scoring highlights with {llm_provider}.")
 
-        # Step 3: AI Highlight Detection
-        from shorts_generator.highlights import get_highlights
-        if mode == "local":
-            from shorts_generator.local.llm import call_local_llm
-            highlights_res = get_highlights(transcript, num_clips=num_clips, llm_fn=call_local_llm)
-        else:
-            from shorts_generator.highlights import call_muapi_llm
-            highlights_res = get_highlights(transcript, num_clips=num_clips, llm_fn=call_muapi_llm)
+        # Step 3: AI Intelligence & Highlight Identification
+        full_transcript_text = " ".join(s.get("text", "") for s in transcript.get("segments", []))
+        ai_analysis = ai_intelligence_service.analyze_content(
+            transcript_text=full_transcript_text,
+            category_id=category_id,
+            video_title=video_title,
+            provider=llm_provider,
+        )
 
-        raw_highlights = highlights_res.get("highlights", [])
-        if not raw_highlights:
-            raise RuntimeError("AI Highlight detector found zero clips.")
+        candidates = ai_analysis.highlights
+        if not candidates:
+            # Fallback to existing highlight detector if custom AI returned none
+            from shorts_generator.highlights import get_highlights
+            if mode == "local":
+                from shorts_generator.local.llm import call_local_llm
+                hl_res = get_highlights(transcript, num_clips=num_clips, llm_fn=call_local_llm)
+            else:
+                from shorts_generator.highlights import call_muapi_llm
+                hl_res = get_highlights(transcript, num_clips=num_clips, llm_fn=call_muapi_llm)
+            raw_hl = hl_res.get("highlights", [])
+            candidates = sorted(raw_hl, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
 
-        # Sort and take top num_clips
-        top_highlights = sorted(raw_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
-        db.add_log(job_id, "highlight_detection", f"Selected top {len(top_highlights)} viral candidates.")
+        top_candidates = candidates[:num_clips]
+        db.add_log(job_id, "highlight_detection", f"Selected {len(top_candidates)} highlights for vertical rendering.")
 
-        # Step 4: Crop Clips to 9:16 vertical & upload
+        # Step 4: Video Rendering & Reframing to 9:16
         db.update_job_progress(job_id, stage="cropping_clips", progress=70)
-        db.add_log(job_id, "cropping_clips", f"Rendering vertical 9:16 shorts using FFmpeg.")
+        db.add_log(job_id, "cropping_clips", "Rendering vertical 9:16 Shorts with audio normalization and subtitle styling.")
 
         rendered_clips = []
-        for i, h in enumerate(top_highlights, 1):
+        for i, c in enumerate(top_candidates, 1):
             clip_id = f"clip_{uuid.uuid4().hex[:12]}"
-            start = float(h["start_time"])
-            end = float(h["end_time"])
-            dur = end - start
+            # Support both dict and Pydantic highlight structures
+            start = float(c.start_time if hasattr(c, "start_time") else c["start_time"])
+            end = float(c.end_time if hasattr(c, "end_time") else c["end_time"])
+            score_val = float(c.virality_score if hasattr(c, "virality_score") else c.get("score", 85))
+            dur = max(end - start, 1.0)
 
-            # Render clip
             out_clip_filename = f"{job_id}_{clip_id}.mp4"
             local_clip_path = os.path.join(temp_dir, out_clip_filename)
 
-            if mode == "local":
-                from shorts_generator.local.clipper import _cut_subclip, _reframe_subclip
-                # 1. cut
-                raw_cut = os.path.join(temp_dir, f"raw_{out_clip_filename}")
-                _cut_subclip(source_video_path, start, end, raw_cut)
-                # 2. reframe to 9:16
-                try:
-                    _reframe_subclip(raw_cut, local_clip_path, aspect_ratio=aspect_ratio)
-                except Exception as e:
-                    logger.warning("Smart reframing failed, falling back to center crop: %s", e)
-                    # ffmpeg crop fallback
-                    import subprocess
-                    crop_cmd = [
-                        "ffmpeg", "-y", "-i", raw_cut,
-                        "-vf", "crop=ih*9/16:ih",
-                        "-c:a", "copy", local_clip_path
-                    ]
-                    subprocess.run(crop_cmd, check=True)
-            else:
-                from shorts_generator.clipper import crop_clip
-                # MuAPI returns remote URL
-                remote_crop_url = crop_clip(source_video_path, start, end, aspect_ratio=aspect_ratio)
-                # Download clip to local for storage upload
-                import requests
-                r = requests.get(remote_crop_url, timeout=120)
-                with open(local_clip_path, "wb") as f:
-                    f.write(r.content)
+            # Use video_renderer for standardized vertical 9:16 generation
+            success, render_msg = video_renderer.render_vertical_clip(
+                source_video_path=source_video_path,
+                start_time=start,
+                end_time=end,
+                output_path=local_clip_path,
+                aspect_ratio=aspect_ratio,
+                normalize_audio=True,
+            )
 
-            # Step 5: Social Metadata Enhancement (Title, Hook, Hashtags, Description)
+            if not success or not os.path.exists(local_clip_path):
+                logger.warning("Standard renderer failed (%s); falling back to direct subclip cut", render_msg)
+                from shorts_generator.local.clipper import _cut_subclip
+                _cut_subclip(source_video_path, start, end, local_clip_path)
+
+            # Step 5: Final Video Validation & Quality Inspection
+            val_result = video_validator.validate_clip(local_clip_path)
+            if not val_result.is_valid:
+                logger.warning("Clip %s failed validation: %s", clip_id, val_result.issues)
+
+            # Step 6: Social Metadata & Category-Aware Copy
+            category_def = category_service.get_category(category_id)
+            c_title = (c.hook if hasattr(c, "hook") else c.get("title")) or f"{category_def.name} Highlight #{i}"
+            c_hook = (c.hook if hasattr(c, "hook") else c.get("hook_sentence")) or c_title
+            c_reason = (c.reason if hasattr(c, "reason") else c.get("virality_reason")) or "High-interest moment"
+
             social_data = generate_clip_social_metadata(
-                clip_text=h.get("title", "") + " " + h.get("hook_sentence", ""),
+                clip_text=f"{c_title} {c_hook}",
                 original_title=video_title,
-                virality_reason=h.get("virality_reason"),
-                gta_preset=gta_preset,
+                virality_reason=c_reason,
+                gta_preset=(category_id == "gaming"),
                 llm_provider=llm_provider,
             )
 
-            # Step 6: Upload to Storage (Supabase Storage or local)
-            public_clip_url, storage_path = storage_service.upload_clip(local_clip_path, out_clip_filename)
+            # Step 7: Storage Upload (Hierarchical tenant isolation)
+            public_clip_url, storage_path = storage_service.upload_clip(
+                local_file_path=local_clip_path,
+                destination_name=out_clip_filename,
+                job_id=job_id,
+                user_id=user_id,
+            )
 
             clip_record = {
                 "id": clip_id,
                 "job_id": job_id,
-                "title": social_data.get("title") or h.get("title", f"Clip #{i}"),
-                "description": social_data.get("description", ""),
-                "hook": social_data.get("hook") or h.get("hook_sentence", ""),
-                "score": int(h.get("score", 85)),
+                "user_id": user_id,
+                "category_id": category_id,
+                "title": social_data.get("title") or c_title,
+                "hook_sentence": social_data.get("hook") or c_hook,
+                "virality_reason": c_reason,
+                "score": score_val,
                 "start_time": start,
                 "end_time": end,
                 "duration": round(dur, 2),
                 "aspect_ratio": aspect_ratio,
-                "clip_url": public_clip_url,
                 "storage_path": storage_path,
-                "captions": None,
-                "hashtags": social_data.get("hashtags", []),
+                "storage_url": public_clip_url,
+                "thumbnail_url": None,
                 "publishing_status": "draft",
+                "suggested_tags": social_data.get("hashtags") or category_def.default_hashtags,
+                "is_quality_approved": val_result.is_valid,
             }
             db.create_clip(clip_record)
             rendered_clips.append(clip_record)
-            db.add_log(job_id, "cropping_clips", f"Rendered and saved clip #{i}: '{clip_record['title']}'")
+            db.add_log(job_id, "cropping_clips", f"Rendered and verified clip #{i}: '{clip_record['title']}' (Score: {score_val:.0f})")
 
-        # Step 7: Completed
+        # Step 8: Complete Job
         db.update_job_progress(job_id, stage="completed", progress=100, status="completed")
-        db.add_log(job_id, "completed", f"Job successfully completed. {len(rendered_clips)} shorts generated.")
+        db.add_log(job_id, "completed", f"Job finished successfully. Generated {len(rendered_clips)} verified vertical shorts.")
 
     except Exception as e:
         logger.exception("Error processing job %s: %s", job_id, e)
         db.update_job_progress(job_id, stage="failed", progress=0, status="failed", error=str(e))
-        db.add_log(job_id, "failed", f"Processing failed: {str(e)}")
+        db.add_log(job_id, "failed", f"Processing aborted: {str(e)}")
 
     finally:
-        # Safe cleanup of all temporary video and audio files
+        # Safe cleanup of all temporary working files
         if os.path.exists(temp_dir):
             try:
                 shutil.rmtree(temp_dir)

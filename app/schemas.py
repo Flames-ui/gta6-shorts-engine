@@ -1,9 +1,10 @@
-"""Pydantic request and response models."""
+"""Comprehensive Pydantic request and response schemas for multi-category production engine."""
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
-from shorts_generator.url_validation import validate_youtube_url
+
+from .services.security import validate_safe_url
 
 
 class JobStatus(str, Enum):
@@ -28,20 +29,29 @@ class JobStage(str, Enum):
 
 class PublishingStatus(str, Enum):
     DRAFT = "draft"
-    PENDING_APPROVAL = "pending_approval"
+    AWAITING_APPROVAL = "awaiting_approval"
     APPROVED = "approved"
+    SCHEDULED = "scheduled"
     PUBLISHING = "publishing"
     PUBLISHED = "published"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
-# --- Request Schemas ---
+# -----------------------------------------------------------------------------
+# Jobs Schemas
+# -----------------------------------------------------------------------------
 
 class JobCreateRequest(BaseModel):
     url: str = Field(
         ...,
-        description="Source YouTube video URL (https://www.youtube.com/... or https://youtu.be/...)",
+        description="Source video URL or local media path",
         examples=["https://www.youtube.com/watch?v=QdBZY2fkU-0"],
+    )
+    category_id: str = Field(
+        default="gaming",
+        description="Content category: gaming, viral_entertainment, animals_nature, tech_ai, sports, or custom",
+        examples=["gaming"],
     )
     num_clips: int = Field(
         default=3,
@@ -59,118 +69,101 @@ class JobCreateRequest(BaseModel):
     )
     language: Optional[str] = Field(
         default=None,
-        description="Optional ISO language code for transcription (e.g. 'en')",
+        description="Transcription language code (ISO 639-1) or auto-detect if None",
     )
     mode: str = Field(
         default="local",
-        description="Processing mode: 'local' (FFmpeg + Whisper + Gemini/OpenAI) or 'api' (MuAPI)",
+        description="Execution mode: local (FFmpeg/faster-whisper) or api",
     )
-    llm_provider: Optional[str] = Field(
+    llm_provider: str = Field(
         default="gemini",
-        description="LLM for highlight scoring and copywriting: 'gemini' or 'openai'",
+        description="LLM for highlight scoring: 'gemini' or 'openai'",
     )
     gta_preset: bool = Field(
         default=True,
-        description="Apply GTA 6 gaming viral hook prompts, title presets, and tags",
+        description="Enable GTA 6 gaming visual and hashtag presets",
     )
     title_prefix: Optional[str] = Field(
         default=None,
-        description="Optional custom prefix for generated clip titles",
+        description="Optional title prefix for generated shorts",
     )
     custom_prompt: Optional[str] = Field(
         default=None,
-        description="Optional custom prompt instructions for highlight ranking",
+        description="Optional custom focus prompt for highlight detection",
     )
     force: bool = Field(
         default=False,
-        description="Force job creation even if an active job exists for this URL",
+        description="Force processing even if duplicate active URL exists",
     )
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        try:
-            return validate_youtube_url(v)
-        except ValueError as exc:
-            raise ValueError(f"Invalid or unsafe URL: {exc}") from exc
-
-    @field_validator("mode")
-    @classmethod
-    def validate_mode(cls, v: str) -> str:
-        v_clean = v.strip().lower()
-        if v_clean not in ("local", "api"):
-            raise ValueError("Mode must be 'local' or 'api'")
-        return v_clean
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("URL cannot be empty.")
+        if not cleaned.startswith("/"):
+            validate_safe_url(cleaned)
+        return cleaned
 
 
 class JobRetryRequest(BaseModel):
-    reason: Optional[str] = Field(default="Manual retry requested via dashboard")
+    reason: Optional[str] = "User requested retry"
 
 
 class JobCancelRequest(BaseModel):
-    reason: Optional[str] = Field(default="Cancelled by user")
+    reason: Optional[str] = "User cancelled job"
 
 
-class ClipApproveRequest(BaseModel):
-    approved_for_publishing: bool = Field(default=True)
-    custom_title: Optional[str] = None
-    custom_description: Optional[str] = None
-    custom_hashtags: Optional[List[str]] = None
+class JobLogEntry(BaseModel):
+    stage: str
+    message: str
+    timestamp: str
 
-
-class ChannelCreateRequest(BaseModel):
-    channel_url: str = Field(..., description="YouTube channel URL or handle")
-    channel_name: str = Field(..., description="Display name for channel")
-    auto_clip_new_videos: bool = Field(default=False, description="Whether to automatically queue new uploads")
-
-
-# --- Response Schemas ---
 
 class ClipResponse(BaseModel):
     id: str
     job_id: str
+    user_id: Optional[str] = None
+    category_id: str = "gaming"
     title: str
-    description: Optional[str] = None
-    hook: Optional[str] = None
-    score: Optional[int] = 0
+    hook_sentence: Optional[str] = None
+    virality_reason: Optional[str] = None
+    score: float
     start_time: float
     end_time: float
     duration: float
-    aspect_ratio: str = "9:16"
-    clip_url: Optional[str] = None
+    aspect_ratio: str
+    storage_url: str
     storage_path: Optional[str] = None
     thumbnail_url: Optional[str] = None
-    captions: Optional[str] = None
-    hashtags: List[str] = Field(default_factory=list)
-    publishing_status: PublishingStatus = PublishingStatus.DRAFT
+    publishing_status: str
+    suggested_tags: List[str] = []
+    is_quality_approved: bool = True
     created_at: str
-
-
-class ProcessingLogEntry(BaseModel):
-    timestamp: str
-    stage: str
-    message: str
+    updated_at: Optional[str] = None
 
 
 class JobResponse(BaseModel):
     id: str
+    user_id: Optional[str] = None
     url: str
+    category_id: str = "gaming"
     status: JobStatus
     stage: JobStage
-    progress: int = Field(default=0, ge=0, le=100)
+    progress: int
     num_clips: int
+    aspect_ratio: str
     video_title: Optional[str] = None
     video_duration: Optional[float] = None
-    error: Optional[str] = None
     mode: str = "local"
     llm_provider: str = "gemini"
-    gta_preset: bool = True
+    error: Optional[str] = None
     retry_count: int = 0
     created_at: str
-    updated_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    clips: List[ClipResponse] = Field(default_factory=list)
-    logs: List[ProcessingLogEntry] = Field(default_factory=list)
+    updated_at: str
+    clips: List[ClipResponse] = []
+    logs: List[JobLogEntry] = []
 
 
 class JobListResponse(BaseModel):
@@ -180,41 +173,143 @@ class JobListResponse(BaseModel):
     offset: int
 
 
-class JobProgressResponse(BaseModel):
+# -----------------------------------------------------------------------------
+# Category Schemas
+# -----------------------------------------------------------------------------
+
+class CategoryResponse(BaseModel):
     id: str
-    status: JobStatus
-    stage: JobStage
-    progress: int
-    error: Optional[str] = None
-    updated_at: Optional[str] = None
+    name: str
+    description: str
+    icon: str
+    is_active: bool
+    scoring_weights: Dict[str, float]
+    default_hashtags: List[str]
+    presets: Any = {}
+    publishing_preferences: Dict[str, Any]
 
 
-class HealthResponse(BaseModel):
-    status: str = "healthy"
-    version: str
-    environment: str
-    timestamp: str
-    redis: str
-    supabase: str
+class CategoryCreateRequest(BaseModel):
+    id: str = Field(..., pattern=r"^[a-z0-9_]{3,30}$")
+    name: str
+    description: str
+    icon: str = "sparkles"
+    system_prompt: str
+    scoring_weights: Optional[Dict[str, float]] = None
+    default_hashtags: Optional[List[str]] = None
+    presets: Optional[Any] = None
 
 
-class StatusResponse(BaseModel):
-    status: str
-    version: str
-    active_jobs: int
-    queued_jobs: int
-    completed_jobs: int
-    failed_jobs: int
-    workers_online: int
-    supported_modes: List[str]
-    default_llm_provider: str
-    storage_provider: str
-    youtube_oauth_configured: bool
+# -----------------------------------------------------------------------------
+# Content Sources & Discovery Schemas
+# -----------------------------------------------------------------------------
+
+class SourceCreateRequest(BaseModel):
+    source_type: str = Field(..., description="official_api, approved_rss, creator_submission, direct_upload")
+    name: str
+    feed_url: Optional[str] = None
+    channel_url: Optional[str] = None
+    category_id: str = "gaming"
+    rights_status: str = "pending_verification"
+    license_type: Optional[str] = None
+    allowed_platforms: List[str] = ["tiktok", "youtube_shorts"]
+
+
+class SourceRightsUpdateRequest(BaseModel):
+    rights_status: str = Field(..., description="authorized_editing, authorized_platforms, rejected, expired")
+    allowed_platforms: List[str] = ["tiktok", "youtube_shorts"]
+    license_type: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class DiscoveredItemResponse(BaseModel):
+    id: str
+    source_id: str
+    title: str
+    original_url: Optional[str] = None
+    media_url: Optional[str] = None
+    creator_name: Optional[str] = None
+    category_id: str
+    duration_seconds: Optional[float] = None
+    rights_status: str
+    discovery_time: str
+    is_processed: bool = False
+
+
+# -----------------------------------------------------------------------------
+# Buffer & Publishing Schemas
+# -----------------------------------------------------------------------------
+
+class ClipApprovalRequest(BaseModel):
+    approved: Optional[bool] = None
+    approved_for_publishing: Optional[bool] = None
+    title: Optional[str] = None
+    custom_title: Optional[str] = None
+    hook: Optional[str] = None
+    hashtags: Optional[List[str]] = None
+
+
+class ClipScheduleRequest(BaseModel):
+    channel_id: str
+    scheduled_for: datetime
+    caption: Optional[str] = None
+    override_quota: bool = False
+
+
+class BufferCallbackRequest(BaseModel):
+    code: str
+    state: Optional[str] = None
+
+
+class BufferConnectResponse(BaseModel):
+    auth_url: str
+    state: str
+
+
+# -----------------------------------------------------------------------------
+# Analytics & Scheduling Schemas
+# -----------------------------------------------------------------------------
+
+class ProductionScheduleUpdateRequest(BaseModel):
+    daily_target_min: Optional[int] = Field(None, ge=1, le=100)
+    daily_target_max: Optional[int] = Field(None, ge=1, le=100)
+    timezone: Optional[str] = None
+    is_paused: Optional[bool] = None
+    category_distribution: Optional[Dict[str, float]] = None
+
+
+# -----------------------------------------------------------------------------
+# Channel Schemas
+# -----------------------------------------------------------------------------
+
+class ChannelCreateRequest(BaseModel):
+    channel_name: str
+    channel_url: str
+    auto_clip_new_videos: bool = False
 
 
 class ChannelResponse(BaseModel):
     id: str
-    channel_url: str
+    user_id: Optional[str] = None
     channel_name: str
-    auto_clip_new_videos: bool
+    channel_url: str
+    auto_clip_new_videos: bool = False
     created_at: str
+
+# -----------------------------------------------------------------------------
+# System Status Schemas
+# -----------------------------------------------------------------------------
+
+class StatusResponse(BaseModel):
+    status: str = "operational"
+    version: str = "2.0.0"
+    active_jobs: int = 0
+    queued_jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    workers_online: int = 1
+    supported_modes: List[str] = ["local", "api"]
+    default_llm_provider: str = "gemini"
+    storage_provider: str = "supabase_storage"
+    youtube_oauth_configured: bool = False

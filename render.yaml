@@ -1,7 +1,7 @@
-# Render Blueprint Specification for GTA 6 Shorts Engine
+# Render Blueprint Specification for Multi-Category Viral Shorts Engine
 # Defines:
 # 1. gta6-shorts-engine (Web Service running FastAPI)
-# 2. gta6-shorts-worker (Background Worker running FFmpeg/Whisper/Gemini pipeline)
+# 2. gta6-shorts-worker (Background Worker running FFmpeg/Whisper/AI pipeline)
 # 3. gta6-shorts-redis (Private Redis task queue)
 
 services:
@@ -22,8 +22,12 @@ services:
         value: production
       - key: LOG_LEVEL
         value: INFO
+      - key: FAIL_CLOSED_IN_PRODUCTION
+        value: "true"
       - key: ENGINE_API_KEY
         generateValue: true
+      - key: CORS_ORIGINS
+        value: "https://lovable.dev,https://lovable.app"
       - key: REDIS_URL
         fromService:
           type: redis
@@ -33,8 +37,18 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
       - key: SUPABASE_STORAGE_BUCKET
-        value: gta6-shorts
+        value: shorts
+      - key: BUFFER_CLIENT_ID
+        sync: false
+      - key: BUFFER_CLIENT_SECRET
+        sync: false
+      - key: BUFFER_ACCESS_TOKEN
+        sync: false
+      - key: BUFFER_REDIRECT_URI
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
@@ -53,7 +67,7 @@ services:
         sync: false
 
   # -------------------------------------------------------------
-  # 2. Background Video Processing Worker
+  # 2. Dedicated Background Video Processing Worker
   # -------------------------------------------------------------
   - type: worker
     name: gta6-shorts-worker
@@ -61,13 +75,16 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: python -m app.worker
-    plan: standard # 2GB+ RAM recommended for Whisper & FFmpeg processing
+    # Use standard plan (2GB+ RAM) minimum: never use 512MB starter for Whisper/FFmpeg
+    plan: standard
     autoDeploy: true
     envVars:
       - key: ENVIRONMENT
         value: production
       - key: LOG_LEVEL
         value: INFO
+      - key: FAIL_CLOSED_IN_PRODUCTION
+        value: "true"
       - key: REDIS_URL
         fromService:
           type: redis
@@ -78,7 +95,7 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: SUPABASE_STORAGE_BUCKET
-        value: gta6-shorts
+        value: shorts
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
@@ -89,6 +106,8 @@ services:
         value: gpt-4o-mini
       - key: LLM_PROVIDER
         value: gemini
+      - key: BUFFER_ACCESS_TOKEN
+        sync: false
       - key: LOCAL_WHISPER_MODEL
         value: base
       - key: LOCAL_WHISPER_DEVICE
@@ -99,6 +118,6 @@ services:
   # -------------------------------------------------------------
   - type: redis
     name: gta6-shorts-redis
-    ipAllowList: [] # Accessible only via Render Private Network
+    ipAllowList: [] # Accessible exclusively via Render Private Network
     plan: starter
     maxmemoryPolicy: noeviction

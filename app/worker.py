@@ -1,4 +1,4 @@
-"""Dedicated Background Worker entrypoint for Render and production."""
+"""Dedicated Background Worker entrypoint for Render and production deployment."""
 import logging
 import os
 import signal
@@ -16,7 +16,7 @@ logger = logging.getLogger("gta6_shorts.worker")
 
 
 def run_worker():
-    logger.info("Initializing GTA 6 Shorts Background Worker")
+    logger.info("Initializing %s Background Worker", settings.APP_NAME)
     logger.info("Connecting to Redis queue at %s", settings.REDIS_URL)
 
     try:
@@ -31,8 +31,9 @@ def run_worker():
         logger.critical("Failed to connect to Redis queue at %s: %s", settings.REDIS_URL, e)
         sys.exit(1)
 
-    listen_queues = [settings.REDIS_QUEUE_NAME]
-    logger.info("Listening on queue: %s", listen_queues)
+    queue_name = getattr(settings, "QUEUE_NAME", "viral-shorts")
+    listen_queues = [queue_name]
+    logger.info("Listening on RQ queue: %s", listen_queues)
 
     def signal_handler(signum, frame):
         logger.info("Received termination signal %s. Shutting down worker gracefully...", signum)
