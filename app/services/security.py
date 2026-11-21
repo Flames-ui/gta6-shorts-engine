@@ -181,12 +181,13 @@ def safe_subprocess_run(
 def _get_fernet_instance() -> Fernet:
     """Derive a deterministic Fernet cipher key from server configuration."""
     from ..config import settings
-    raw_key = (
-        (settings.TOKEN_ENCRYPTION_KEY or "").strip()
-        or (settings.ENGINE_API_KEY or "").strip()
-        or (settings.SUPABASE_JWT_SECRET or "").strip()
-        or "gta6_shorts_engine_production_fallback_key_32bytes_min"
-    )
+    raw_key = (settings.TOKEN_ENCRYPTION_KEY or "").strip()
+    if not raw_key:
+        if settings.ENVIRONMENT.lower() == "production":
+            raise RuntimeError("TOKEN_ENCRYPTION_KEY must be configured in production; no fallback is permitted.")
+        raw_key = (settings.ENGINE_API_KEY or settings.SUPABASE_JWT_SECRET or "local-development-only-key").strip()
+    if len(raw_key) < 32 and settings.ENVIRONMENT.lower() == "production":
+        raise RuntimeError("TOKEN_ENCRYPTION_KEY must contain at least 32 characters in production.")
     derived = hashlib.sha256(raw_key.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(derived))
 

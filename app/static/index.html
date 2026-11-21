@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GTA 6 Shorts Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-badge">VI</span>
+        <div>
+          <div class="brand-title">GTA 6 SHORTS</div>
+          <div class="brand-subtitle">STUDIO ENGINE</div>
+        </div>
+      </div>
+      <ul class="nav-menu">
+        <li class="nav-item">
+          <a class="nav-link active" data-tab="studio">
+            <span>🎬</span> Clip Studio
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" data-tab="autonomous">
+            <span>⚡</span> Autonomous Engine
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" data-tab="registry">
+            <span>📡</span> GTA 6 Registry & Feed
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" data-tab="outro">
+            <span>🤖</span> Stickman Outro Studio
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" data-tab="library">
+            <span>🎞️</span> Video Library
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" data-tab="publishing">
+            <span>🚀</span> Publishing Queue
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" data-tab="health">
+            <span>🛡️</span> Security & Health
+          </a>
+        </li>
+      </ul>
+      <div class="sidebar-footer">
+        <div><span class="status-indicator"></span> Backend status</div>
+        <span id="api-status-badge" class="badge badge-warning">VERIFYING</span>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="main-wrapper">
+      <header class="top-bar">
+        <div class="top-title" id="page-title">
+          <span>🎬</span> Clip Studio (6-Track NLE Multitrack)
+        </div>
+        <div class="top-actions">
+          <span class="badge badge-warning">Automation unavailable</span>
+          <button id="btn-refresh-data" class="btn btn-primary btn-sm">
+            🔄 Refresh Engine
+          </button>
+        </div>
+      </header>
+
+      <div class="content-pane">
+        <!-- TAB 1: CLIP STUDIO -->
+        <section id="tab-studio" class="tab-section active">
+          <div class="studio-grid">
+            <!-- Left: 9:16 Vertical Preview & Inspector -->
+            <div>
+              <div class="preview-container">
+                <div class="preview-screen">
+                  <video id="studio-video-player" controls playsinline></video>
+                  <div class="preview-hook-overlay" id="studio-hook-display"></div>
+                </div>
+                <div style="margin-top: 14px; width: 100%; display: flex; justify-content: space-between; align-items: center;">
+                  <span class="badge badge-info">1080x1920 (9:16)</span>
+                  <span id="studio-video-duration" style="font-size: 12px; font-family: monospace;">Select a clip to inspect its timeline</span>
+                </div>
+              </div>
+
+              <!-- Inspector Card -->
+              <div class="card" style="margin-top: 16px;">
+                <div class="card-header">
+                  <div class="card-title"><span>🎛️</span> Studio Inspector</div>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Hook Text</label>
+                  <input type="text" id="inspector-hook-text" class="form-control" value="">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Configured promotional outro</label>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="checkbox" id="inspector-outro-toggle">
+                    <span style="font-size: 13px;">Append configured outro (duration from settings)</span>
+                  </div>
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                  <button id="btn-save-timeline" class="btn btn-secondary btn-sm" style="flex: 1;">
+                    💾 Save Timeline
+                  </button>
+                  <button id="btn-render-studio" class="btn btn-primary btn-sm" style="flex: 1;">
+                    ⚡ Render Vertical Clip
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right: 6-Track Timeline & Console -->
+            <div>
+              <div class="timeline-card">
+                <div class="timeline-toolbar">
+                  <div style="font-weight: 700; font-size: 14px;">Timeline (basic render support)</div>
+                  <div class="time-display" id="studio-timecode">No clip selected</div>
+                </div>
+
+                <div class="timeline-tracks" id="timeline-tracks-container">
+                  <!-- Track 1: Video -->
+                  <div class="track-row">
+                    <div class="track-label">🎞️ Track 1: Video</div>
+                    <div class="track-lane">
+                      <span class="track-empty">No source video loaded</span>
+                    </div>
+                  </div>
+
+                  <!-- Track 2: Audio -->
+                  <div class="track-row">
+                    <div class="track-label">🔊 Track 2: Audio</div>
+                    <div class="track-lane">
+                      <span class="track-empty">No audio analysis available</span>
+                    </div>
+                  </div>
+
+                  <!-- Track 3: Captions -->
+                  <div class="track-row">
+                    <div class="track-label">💬 Track 3: Captions</div>
+                    <div class="track-lane">
+                      
+                      
+                      
+                    </div>
+                  </div>
+
+                  <!-- Track 4: Hooks -->
+                  <div class="track-row">
+                    <div class="track-label">🪝 Track 4: Hook</div>
+                    <div class="track-lane">
+                      <span class="track-empty">No hook set</span>
+                    </div>
+                  </div>
+
+                  <!-- Track 5: Reframing / Motion -->
+                  <div class="track-row">
+                    <div class="track-label">📐 Track 5: Framing</div>
+                    <div class="track-lane">
+                      <span class="track-empty">No reframing keyframes</span>
+                    </div>
+                  </div>
+
+                  <!-- Track 6: Outro -->
+                  <div class="track-row">
+                    <div class="track-label">🤖 Track 6: Outro</div>
+                    <div class="track-lane">
+                      <span class="track-empty">Outro disabled or not configured</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Studio Activity -->
+              <div class="card" style="margin-top: 16px;">
+                <div class="card-header">
+                  <div class="card-title">
+                    <span>📡</span> Studio Activity Events
+                  </div>
+                  <span id="sse-badge" class="badge badge-warning">CONNECTING</span>
+                </div>
+                <div class="console-box" id="studio-console-log">
+                  <div class="console-line dim">No persisted editing events are available yet.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 2: AUTONOMOUS ENGINE -->
+        <section id="tab-autonomous" class="tab-section">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-value" id="auto-stat-today">—</div>
+              <div class="stat-label">Clips created today / configured target</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="auto-stat-published">—</div>
+              <div class="stat-label">Published today · stats only</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="auto-stat-score">—</div>
+              <div class="stat-label">Average candidate score</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="auto-stat-status">PAUSED</div>
+              <div class="stat-label">Autonomous State</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title"><span>⚡</span> Autonomous Pipeline · Not connected</div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;">
+              <div class="form-group">
+                <label class="form-label">Autonomous Production Mode</label>
+                <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px;">
+                  <input type="checkbox" id="auto-config-active" disabled>
+                  <span style="font-size: 13px;">Autonomous ingestion is not connected</span>
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Auto-Publish to Channels</label>
+                <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px;">
+                  <input type="checkbox" id="auto-config-publish" disabled>
+                  <span style="font-size: 13px;">Automatic publishing is not connected</span>
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Daily Shorts Target Quota</label>
+                <input type="number" id="auto-config-daily" class="form-control" value="15" min="1" max="50">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Minimum Viral Confidence Score (0-10)</label>
+                <input type="number" id="auto-config-minscore" class="form-control" value="8.0" step="0.1" min="5.0" max="10.0">
+              </div>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
+              <button id="btn-save-autonomous-config" class="btn btn-secondary">Save Targets</button>
+              <button id="btn-trigger-autonomous" class="btn btn-primary" disabled>Cycle unavailable</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 3: REGISTRY & FEED -->
+        <section id="tab-registry" class="tab-section">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title"><span>📡</span> Verified GTA 6 Content Sources</div>
+              <button id="btn-poll-sources" class="btn btn-secondary btn-sm">Poll Sources Now</button>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Source Name</th>
+                  <th>Type</th>
+                  <th>Rights Status</th>
+                  <th>Attribution</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sources-table-body">
+                <!-- Injected via JavaScript -->
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card" style="margin-top: 20px;">
+            <div class="card-header">
+              <div class="card-title"><span>🔥</span> Discovered High-Yield GTA 6 Moments</div>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Title & Hook</th>
+                  <th>Score</th>
+                  <th>Duration</th>
+                  <th>Event Type</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="moments-table-body">
+                <!-- Injected via JavaScript -->
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- TAB 4: TALKING STICKMAN OUTRO STUDIO -->
+        <section id="tab-outro" class="tab-section">
+          <div style="display: grid; grid-template-columns: 360px 1fr; gap: 24px;">
+            <div class="preview-container">
+              <div class="preview-screen">
+                <video id="outro-video-preview" controls playsinline></video>
+              </div>
+              <div style="margin-top: 12px; text-align: center;">
+                <span class="badge badge-warning">No outro configured</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title"><span>🤖</span> Outro Configuration & Synthesis</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Outro injection</label>
+                <div style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="outro-enabled"><span>Append this video to eligible renders</span></div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Promotional Copy (rendered text; no generated speech)</label>
+                <textarea id="outro-promo-text" class="form-control" rows="3">Join our channel</textarea>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Destination URL</label>
+                <input type="text" id="outro-channel-url" class="form-control" value="" placeholder="Paste a destination URL">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Outro Duration (Seconds)</label>
+                <input type="number" id="outro-duration" class="form-control" value="4.0" step="0.5" min="1.0" max="10.0">
+              </div>
+              <div style="display: flex; gap: 12px; margin-top: 16px;">
+                <button id="btn-save-outro" class="btn btn-secondary">Save Outro Settings</button>
+                <button id="btn-regenerate-outro" class="btn btn-whatsapp">Generate Outro Video</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 5: VIDEO LIBRARY -->
+        <section id="tab-library" class="tab-section">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title"><span>🎞️</span> Clips</div>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Duration</th>
+                  <th>Publishing Status</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="clips-table-body">
+                <!-- Injected via JavaScript -->
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- TAB 6: PUBLISHING QUEUE -->
+        <section id="tab-publishing" class="tab-section">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title"><span>🚀</span> Scheduled Publishing Queue</div>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Clip ID</th>
+                  <th>Channel / Platform</th>
+                  <th>Scheduled For</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="publishing-queue-body">
+                <!-- Injected via JavaScript -->
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- TAB 7: SECURITY & HEALTH -->
+        <section id="tab-health" class="tab-section">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title"><span>🛡️</span> Security Hardening & Fail-Closed Gate Status</div>
+            </div>
+            <table class="data-table">
+              <tbody>
+                <tr>
+                  <td><strong>Engine Environment</strong></td>
+                  <td id="health-env">Checking…</td>
+                </tr>
+                <tr>
+                  <td><strong>Fail-Closed Rights Verification</strong></td>
+                  <td>Production checks block unverified source IDs and unapproved reuse rights</td>
+                </tr>
+                <tr>
+                  <td><strong>OAuth Credential Encryption</strong></td>
+                  <td>Fernet encryption; production requires a configured encryption key</td>
+                </tr>
+                <tr>
+                  <td><strong>Render Engine</strong></td>
+                  <td>FFmpeg required for rendering; actual version not reported</td>
+                </tr>
+                <tr>
+                  <td><strong>Database</strong></td>
+                  <td id="health-db">Checking…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

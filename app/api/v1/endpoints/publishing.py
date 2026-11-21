@@ -57,17 +57,28 @@ async def handle_buffer_callback(payload: BufferCallbackRequest):
     # Persist access token associated with the user
     user_id = state_record.get("user_id")
     access_token = res.get("access_token")
-    if access_token:
-        try:
-            db.save_publishing_account({
-                "id": f"buffer_{user_id or 'admin'}",
-                "user_id": user_id,
-                "service": "buffer",
-                "access_token_encrypted": access_token,
-                "is_active": True,
-            })
-        except Exception as exc:
-            logger.error("Failed to persist publishing account: %s", exc)
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Buffer authorization exchange did not return a valid access token.",
+        )
+
+    try:
+        saved = db.save_publishing_account({
+            "id": f"buffer_{user_id or 'admin'}",
+            "user_id": user_id,
+            "service": "buffer",
+            "access_token": access_token,
+            "is_active": True,
+        })
+        if not saved:
+            raise RuntimeError("Database returned empty result upon saving publishing account")
+    except Exception as exc:
+        logger.error("Failed to persist publishing account: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist authenticated Buffer publishing credentials.",
+        ) from exc
 
     return {"status": "connected", "service": "buffer"}
 

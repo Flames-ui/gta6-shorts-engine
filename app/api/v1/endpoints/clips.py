@@ -1,3 +1,4 @@
+
 """Generated clips retrieval, review, Buffer scheduling, and direct publishing endpoints."""
 import logging
 from typing import List, Optional
@@ -18,6 +19,7 @@ from ....services.supabase_client import db
 
 logger = logging.getLogger("gta6_shorts.clips")
 router = APIRouter(tags=["Clips"])
+
 
 
 @router.get("/clips/{clip_id}", response_model=ClipResponse)
@@ -123,12 +125,11 @@ async def publish_clip(
             detail="YouTube Data API OAuth is not configured on this engine. Use Buffer publishing via /api/v1/clips/{clip_id}/schedule or configure YouTube credentials.",
         )
 
-    # In production, dispatch actual publishing job
-    return {
-        "status": "publishing_initiated",
-        "clip_id": clip_id,
-        "service": "youtube",
-    }
+    # Never report success until an authenticated provider upload is implemented.
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Direct YouTube publishing is not configured. Connect Buffer or configure the supported publishing integration before publishing.",
+    )
 
 
 @router.post("/clips/{clip_id}/schedule")
@@ -143,16 +144,35 @@ async def schedule_clip_publishing(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Clip {clip_id} not found")
     enforce_resource_ownership(clip.get("user_id"), auth, "clip")
 
-    if clip.get("publishing_status") not in (PublishingStatus.APPROVED.value, "approved", PublishingStatus.DRAFT.value, "draft"):
+    if clip.get("publishing_status") not in (PublishingStatus.APPROVED.value, "approved"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Clip cannot be scheduled in current status: {clip.get('publishing_status')}",
+            detail=f"Clip cannot be scheduled in current status '{clip.get('publishing_status')}'. Only approved clips can be scheduled.",
         )
 
-    # Verify rights if linked to a source
+    # Verify rights
     source_id = clip.get("source_id")
+    if not source_id:
+        parent_job = db.get_job(clip.get("job_id", ""))
+        if parent_job and parent_job.get("source_id"):
+            source_id = parent_job.get("source_id")
+
+    if not source_id and settings.ENVIRONMENT.lower() == "production" and settings.FAIL_CLOSED_IN_PRODUCTION:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Content rights verification failed: Missing source ID. Scheduling requires a verified content source record.",
+        )
+    profiles = buffer_publisher.get_user_profiles(user_id=auth.user_id)
+    target_profile = next((profile for profile in profiles if profile.get("id") == payload.channel_id), None)
+    if not target_profile:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selected publishing channel is not connected to this Buffer account")
+    provider = str(target_profile.get("service", "")).lower()
+    if provider not in ("tiktok", "youtube"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Publishing to {provider or 'unknown'} channels is not supported for this workflow")
+    target_platform = "youtube_shorts" if provider == "youtube" else "tiktok"
+
     if source_id:
-        allowed, reason = rights_manager.check_rights_for_production(source_id, target_platform="tiktok")
+        allowed, reason = rights_manager.check_rights_for_production(source_id, target_platform=target_platform)
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

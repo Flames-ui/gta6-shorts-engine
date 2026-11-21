@@ -1,10 +1,11 @@
+"""FastAPI application entrypoint for GTA 6 Shorts Studio."""
 from .services.rate_limiter import rate_limiter
-"""FastAPI application entrypoint for GTA 6 & Multi-Category Viral Shorts Engine."""
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from .api.v1.endpoints import health
 from .api.v1.router import api_v1_router
@@ -93,3 +94,21 @@ app.add_middleware(
 # -----------------------------------------------------------------------------
 app.include_router(health.router)
 app.include_router(api_v1_router)
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+@app.get("/", include_in_schema=False)
+async def serve_dashboard():
+    """Serve GTA 6 Shorts Studio dashboard frontend."""
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+@app.get("/static/{file_path:path}", include_in_schema=False)
+async def serve_static(file_path: str):
+    """Serve static frontend assets."""
+    static_root = os.path.realpath(STATIC_DIR)
+    target = os.path.realpath(os.path.join(static_root, file_path))
+    if os.path.commonpath([static_root, target]) != static_root:
+        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
+    if not os.path.isfile(target):
+        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
+    return FileResponse(target)

@@ -4,16 +4,19 @@ from .endpoints import (
     analytics,
     audit_logs,
     auth,
+    autonomous,
     categories,
     channels,
     clips,
     dashboard,
     discovery,
     jobs,
+    outro,
     publishing,
     quotas,
     schedules,
     status,
+    studio,
 )
 
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -23,6 +26,9 @@ api_v1_router.include_router(dashboard.router)
 api_v1_router.include_router(status.router)
 api_v1_router.include_router(jobs.router)
 api_v1_router.include_router(clips.router)
+api_v1_router.include_router(studio.router)
+api_v1_router.include_router(autonomous.router)
+api_v1_router.include_router(outro.router)
 api_v1_router.include_router(categories.router)
 api_v1_router.include_router(discovery.router)
 api_v1_router.include_router(publishing.router)

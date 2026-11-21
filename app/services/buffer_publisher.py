@@ -197,8 +197,8 @@ class BufferPublisherService:
 
         if clip_record:
             status = clip_record.get("publishing_status")
-            if status not in (BufferPublishingStatus.APPROVED, "approved", BufferPublishingStatus.DRAFT, "draft"):
-                raise ValueError("Clip must be approved before publishing can be initiated.")
+            if status not in (BufferPublishingStatus.APPROVED, "approved"):
+                raise ValueError("Clip must be approved before publishing can be initiated. Draft clips cannot be scheduled or published.")
             if not media_url:
                 media_url = clip_record.get("storage_url")
             if not effective_text:
@@ -293,11 +293,7 @@ class BufferPublisherService:
 
     def sync_publishing_item_status(self, queue_item_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Check remote Buffer update status and update publishing_queue and generated_clips accordingly."""
-        item = None
-        if db.has_supabase:
-            res = db.client.table("publishing_queue").select("*").eq("id", queue_item_id).limit(1).execute()
-            if res.data:
-                item = res.data[0]
+        item = db.get_publishing_queue_item(queue_item_id)
 
         if not item or not item.get("platform_update_id"):
             return {"status": "unknown", "synced": False, "error": "Queue item or platform_update_id not found"}
@@ -321,10 +317,9 @@ class BufferPublisherService:
             elif buffer_status in ("failed", "error"):
                 new_status = "failed"
 
-            if db.has_supabase:
-                db.client.table("publishing_queue").update({"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", queue_item_id).execute()
-                if new_status == "published" and item.get("clip_id"):
-                    db.client.table("generated_clips").update({"publishing_status": "published"}).eq("id", item["clip_id"]).execute()
+            db.update_publishing_queue_item(queue_item_id, {"status": new_status})
+            if new_status == "published" and item.get("clip_id"):
+                db.update_clip(item["clip_id"], {"publishing_status": "published"})
             return {"status": new_status, "synced": True, "buffer_status": buffer_status}
         except Exception as exc:
             return {"status": item.get("status"), "synced": False, "error": str(exc)}

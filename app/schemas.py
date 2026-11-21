@@ -17,10 +17,13 @@ class JobStatus(str, Enum):
 
 class JobStage(str, Enum):
     PENDING = "pending"
+    RIGHTS_CHECK = "rights_check"
     DOWNLOADING = "downloading"
     TRANSCRIBING = "transcribing"
     HIGHLIGHT_DETECTION = "highlight_detection"
     CROPPING_CLIPS = "cropping_clips"
+    MULTITRACK_EDITING = "multitrack_editing"
+    OUTRO_INJECTION = "outro_injection"
     UPLOADING_STORAGE = "uploading_storage"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -225,6 +228,14 @@ class SourceCreateRequest(BaseModel):
     rights_status: str = "pending_verification"
     license_type: Optional[str] = None
     allowed_platforms: List[str] = ["tiktok", "youtube_shorts"]
+
+
+class SourceUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    feed_url: Optional[str] = None
+    channel_url: Optional[str] = None
+    is_active: Optional[bool] = None
+    auto_clip_enabled: Optional[bool] = None
 
 
 class SourceRightsUpdateRequest(BaseModel):

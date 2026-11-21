@@ -135,8 +135,10 @@ class RightsManager:
 
         return None
 
-    def check_rights_for_production(self, source_id: str, target_platform: str = "tiktok") -> Tuple[bool, str]:
+    def check_rights_for_production(self, source_id: Optional[str], target_platform: str = "tiktok") -> Tuple[bool, str]:
         """Check if source has verified rights for production (checking cache & database)."""
+        if not source_id:
+            return False, "Missing source ID: verified content rights require an authorized source identifier."
         perm = self.get_permission(source_id)
         if not perm:
             return False, f"No rights permission record found for source '{source_id}'."

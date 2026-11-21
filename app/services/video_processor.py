@@ -45,8 +45,13 @@ def process_video_job(job_id: str):
         db.update_job_progress(job_id, stage="downloading", progress=10, status="processing")
         db.add_log(job_id, "downloading", f"Acquiring video source for category '{category_id}': {job['url']}")
 
-        # Check source rights if linked
+        # Check source rights (fail-closed in production)
         source_id = job.get("source_id")
+        if not source_id and settings.ENVIRONMENT.lower() == "production" and settings.FAIL_CLOSED_IN_PRODUCTION:
+            db.update_job_progress(job_id, stage="rights_check", status="failed", error="Rights check failed: No authorized source ID associated with job in production.")
+            db.add_log(job_id, "rights_check", "Blocked by content rights check: Missing authorized source ID.")
+            return
+
         if source_id:
             from .discovery.rights_manager import rights_manager
             allowed, msg = rights_manager.check_rights_for_production(source_id)

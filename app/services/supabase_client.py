@@ -277,6 +277,48 @@ class DatabaseClient:
                     updated_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS outro_settings (
+                    id TEXT PRIMARY KEY DEFAULT 'default',
+                    enabled INTEGER DEFAULT 1,
+                    outro_path TEXT,
+                    promo_text TEXT,
+                    destination_url TEXT,
+                    duration_seconds REAL DEFAULT 4.0,
+                    qr_code_enabled INTEGER DEFAULT 1,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS autonomous_config (
+                    id TEXT PRIMARY KEY DEFAULT 'default',
+                    is_active INTEGER DEFAULT 0,
+                    daily_target INTEGER DEFAULT 15,
+                    auto_publish INTEGER DEFAULT 0,
+                    min_score REAL DEFAULT 8.0,
+                    outro_enabled INTEGER DEFAULT 1,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS clip_timelines (
+                    clip_id TEXT PRIMARY KEY,
+                    timeline_data TEXT NOT NULL,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS discovered_moments (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT,
+                    video_url TEXT,
+                    title TEXT NOT NULL,
+                    start_time REAL NOT NULL,
+                    end_time REAL NOT NULL,
+                    duration REAL NOT NULL,
+                    score REAL NOT NULL DEFAULT 8.0,
+                    hook_text TEXT,
+                    event_type TEXT,
+                    status TEXT DEFAULT 'detected',
+                    created_at TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
@@ -675,6 +717,23 @@ class DatabaseClient:
                 results.append(d)
             return results
 
+    def update_source(self, source_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update source metadata using only known source columns."""
+        allowed = {"name", "feed_url", "channel_url", "category_id", "is_active", "auto_clip_enabled", "creator_name"}
+        safe = {key: value for key, value in updates.items() if key in allowed}
+        if not safe:
+            return self.get_source(source_id)
+        if self.has_supabase:
+            result = self.client.table("content_sources").update(safe).eq("id", source_id).execute()
+            return result.data[0] if result.data else self.get_source(source_id)
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(content_sources)").fetchall()}
+            safe = {key: value for key, value in safe.items() if key in columns}
+            if safe:
+                assignments = ", ".join(f"{key} = ?" for key in safe)
+                conn.execute(f"UPDATE content_sources SET {assignments} WHERE id = ?", list(safe.values()) + [source_id])
+        return self.get_source(source_id)
+
     # -------------------------------------------------------------------------
     # Source Permissions CRUD
     # -------------------------------------------------------------------------
@@ -885,10 +944,30 @@ class DatabaseClient:
     # -------------------------------------------------------------------------
     def save_publishing_account(self, account_data: Dict[str, Any]) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
+        # Strictly encrypt access token if supplied in plaintext or unencrypted
         if "access_token" in account_data and account_data["access_token"]:
-            account_data["access_token_encrypted"] = encrypt_secret(account_data["access_token"])
+            raw_val = account_data.pop("access_token")
+            account_data["access_token_encrypted"] = encrypt_secret(raw_val)
+        elif "access_token_encrypted" in account_data and account_data["access_token_encrypted"]:
+            # This field must already contain ciphertext. Reject plaintext rather than
+            # guessing, silently encrypting twice, or corrupting ciphertext from a
+            # previous key.
+            val = account_data["access_token_encrypted"]
+            if decrypt_secret(val) == val:
+                raise ValueError("access_token_encrypted must be valid ciphertext for the configured key")
+
+        # Strictly encrypt refresh token if supplied
         if "refresh_token" in account_data and account_data["refresh_token"]:
-            account_data["refresh_token_encrypted"] = encrypt_secret(account_data["refresh_token"])
+            raw_val = account_data.pop("refresh_token")
+            account_data["refresh_token_encrypted"] = encrypt_secret(raw_val)
+        elif "refresh_token_encrypted" in account_data and account_data["refresh_token_encrypted"]:
+            val = account_data["refresh_token_encrypted"]
+            if decrypt_secret(val) == val:
+                raise ValueError("refresh_token_encrypted must be valid ciphertext for the configured key")
+
+        # Pop any remaining plaintext tokens to prevent plaintext storage
+        account_data.pop("access_token", None)
+        account_data.pop("refresh_token", None)
         account_data["created_at"] = account_data.get("created_at") or now_iso
         account_data["updated_at"] = now_iso
 
@@ -934,9 +1013,15 @@ class DatabaseClient:
 
         if acc:
             if acc.get("access_token_encrypted"):
-                acc["access_token"] = decrypt_secret(acc["access_token_encrypted"])
+                token = decrypt_secret(acc["access_token_encrypted"])
+                if token == acc["access_token_encrypted"]:
+                    raise RuntimeError("Stored access token cannot be decrypted; reconnect the publishing account.")
+                acc["access_token"] = token
             if acc.get("refresh_token_encrypted"):
-                acc["refresh_token"] = decrypt_secret(acc["refresh_token_encrypted"])
+                token = decrypt_secret(acc["refresh_token_encrypted"])
+                if token == acc["refresh_token_encrypted"]:
+                    raise RuntimeError("Stored refresh token cannot be decrypted; reconnect the publishing account.")
+                acc["refresh_token"] = token
         return acc
 
     # -------------------------------------------------------------------------
@@ -1411,10 +1496,324 @@ class DatabaseClient:
 
         for acc in accounts:
             if acc.get("access_token_encrypted"):
-                acc["access_token"] = decrypt_secret(acc["access_token_encrypted"])
+                token = decrypt_secret(acc["access_token_encrypted"])
+                if token == acc["access_token_encrypted"]:
+                    raise RuntimeError("Stored access token cannot be decrypted; reconnect the publishing account.")
+                acc["access_token"] = token
             if acc.get("refresh_token_encrypted"):
-                acc["refresh_token"] = decrypt_secret(acc["refresh_token_encrypted"])
+                token = decrypt_secret(acc["refresh_token_encrypted"])
+                if token == acc["refresh_token_encrypted"]:
+                    raise RuntimeError("Stored refresh token cannot be decrypted; reconnect the publishing account.")
+                acc["refresh_token"] = token
         return accounts
+
+
+
+    def get_publishing_queue_item(self, item_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table("publishing_queue").select("*").eq("id", item_id).limit(1).execute()
+            return res.data[0] if res.data else None
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM publishing_queue WHERE id = ? LIMIT 1", (item_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_publishing_queue_item(self, item_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updates["updated_at"] = now_iso
+        if self.has_supabase:
+            res = self.client.table("publishing_queue").update(updates).eq("id", item_id).execute()
+            return res.data[0] if res.data else None
+        current = self.get_publishing_queue_item(item_id)
+        if not current:
+            return None
+        current.update(updates)
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                UPDATE publishing_queue
+                SET status = ?, platform_update_id = ?, error_message = ?, retry_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    current.get("status"),
+                    current.get("platform_update_id"),
+                    current.get("error_message"),
+                    current.get("retry_count", 0),
+                    now_iso,
+                    item_id,
+                ),
+            )
+        return current
+
+    # -------------------------------------------------------------------------
+    # Outro Settings CRUD
+    # -------------------------------------------------------------------------
+    def get_outro_settings(self, settings_id: str = "default") -> Dict[str, Any]:
+        default_val = {
+            "id": settings_id,
+            "enabled": False,
+            "outro_path": "",
+            "promo_text": "Join our WhatsApp channel",
+            "destination_url": "",
+            "duration_seconds": 4.0,
+            "qr_code_enabled": False,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if self.has_supabase:
+            try:
+                res = self.client.table("outro_settings").select("*").eq("id", settings_id).limit(1).execute()
+                if res.data:
+                    return res.data[0]
+            except Exception:
+                pass
+            return default_val
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM outro_settings WHERE id = ? LIMIT 1", (settings_id,)).fetchone()
+            if row:
+                d = dict(row)
+                d["enabled"] = bool(d.get("enabled", 1))
+                d["qr_code_enabled"] = bool(d.get("qr_code_enabled", 1))
+                return d
+        return default_val
+
+    def save_outro_settings(self, settings_data: Dict[str, Any]) -> Dict[str, Any]:
+        settings_id = settings_data.get("id", "default")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        settings_data["id"] = settings_id
+        settings_data["updated_at"] = now_iso
+
+        if self.has_supabase:
+            try:
+                res = self.client.table("outro_settings").upsert(settings_data, on_conflict="id").execute()
+                return res.data[0] if res.data else settings_data
+            except Exception as e:
+                logger.error("Error upserting outro settings in Supabase: %s", e)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO outro_settings
+                (id, enabled, outro_path, promo_text, destination_url, duration_seconds, qr_code_enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settings_id,
+                    1 if settings_data.get("enabled", True) else 0,
+                    settings_data.get("outro_path", ""),
+                    settings_data.get("promo_text", ""),
+                    settings_data.get("destination_url", ""),
+                    float(settings_data.get("duration_seconds", 4.0)),
+                    1 if settings_data.get("qr_code_enabled", True) else 0,
+                    now_iso,
+                ),
+            )
+        return settings_data
+
+    # -------------------------------------------------------------------------
+    # Autonomous Engine Config CRUD
+    # -------------------------------------------------------------------------
+    def get_autonomous_config(self, config_id: str = "default") -> Dict[str, Any]:
+        default_val = {
+            "id": config_id,
+            "is_active": False,
+            "daily_target": 15,
+            "auto_publish": False,
+            "min_score": 8.0,
+            "outro_enabled": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if self.has_supabase:
+            try:
+                res = self.client.table("autonomous_config").select("*").eq("id", config_id).limit(1).execute()
+                if res.data:
+                    return res.data[0]
+            except Exception:
+                pass
+            return default_val
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM autonomous_config WHERE id = ? LIMIT 1", (config_id,)).fetchone()
+            if row:
+                d = dict(row)
+                d["is_active"] = bool(d.get("is_active", 0))
+                d["auto_publish"] = bool(d.get("auto_publish", 0))
+                d["outro_enabled"] = bool(d.get("outro_enabled", 1))
+                return d
+        return default_val
+
+    def save_autonomous_config(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        config_id = config_data.get("id", "default")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        config_data["id"] = config_id
+        config_data["updated_at"] = now_iso
+
+        if self.has_supabase:
+            try:
+                res = self.client.table("autonomous_config").upsert(config_data, on_conflict="id").execute()
+                return res.data[0] if res.data else config_data
+            except Exception as e:
+                logger.error("Error upserting autonomous config in Supabase: %s", e)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO autonomous_config
+                (id, is_active, daily_target, auto_publish, min_score, outro_enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    config_id,
+                    1 if config_data.get("is_active") else 0,
+                    int(config_data.get("daily_target", 15)),
+                    1 if config_data.get("auto_publish") else 0,
+                    float(config_data.get("min_score", 8.0)),
+                    1 if config_data.get("outro_enabled", True) else 0,
+                    now_iso,
+                ),
+            )
+        return config_data
+
+    # -------------------------------------------------------------------------
+    # Clip Timeline CRUD
+    # -------------------------------------------------------------------------
+    def get_clip_timeline(self, clip_id: str) -> Optional[Dict[str, Any]]:
+        import json
+        if self.has_supabase:
+            try:
+                res = self.client.table("clip_timelines").select("*").eq("clip_id", clip_id).limit(1).execute()
+                if res.data:
+                    raw = res.data[0].get("timeline_data")
+                    return json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM clip_timelines WHERE clip_id = ? LIMIT 1", (clip_id,)).fetchone()
+            if row:
+                raw = dict(row).get("timeline_data")
+                return json.loads(raw) if isinstance(raw, str) else raw
+        return None
+
+    def save_clip_timeline(self, clip_id: str, timeline_data: Dict[str, Any]) -> Dict[str, Any]:
+        import json
+        now_iso = datetime.now(timezone.utc).isoformat()
+        raw_json = json.dumps(timeline_data)
+
+        if self.has_supabase:
+            try:
+                self.client.table("clip_timelines").upsert(
+                    {"clip_id": clip_id, "timeline_data": raw_json, "updated_at": now_iso},
+                    on_conflict="clip_id",
+                ).execute()
+            except Exception as e:
+                logger.error("Error saving timeline to Supabase: %s", e)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO clip_timelines (clip_id, timeline_data, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (clip_id, raw_json, now_iso),
+            )
+        return timeline_data
+
+    # -------------------------------------------------------------------------
+    # Discovered Moments CRUD
+    # -------------------------------------------------------------------------
+    def save_discovered_moment(self, moment_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        moment_data["created_at"] = moment_data.get("created_at") or now_iso
+        if self.has_supabase:
+            try:
+                res = self.client.table("discovered_moments").upsert(moment_data, on_conflict="id").execute()
+                return res.data[0] if res.data else moment_data
+            except Exception as e:
+                logger.error("Error saving moment to Supabase: %s", e)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO discovered_moments
+                (id, source_id, video_url, title, start_time, end_time, duration, score, hook_text, event_type, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    moment_data["id"],
+                    moment_data.get("source_id"),
+                    moment_data.get("video_url"),
+                    moment_data["title"],
+                    float(moment_data.get("start_time", 0.0)),
+                    float(moment_data.get("end_time", 0.0)),
+                    float(moment_data.get("duration", 0.0)),
+                    float(moment_data.get("score", 8.0)),
+                    moment_data.get("hook_text"),
+                    moment_data.get("event_type", "gameplay"),
+                    moment_data.get("status", "detected"),
+                    moment_data["created_at"],
+                ),
+            )
+        return moment_data
+
+    def list_discovered_moments(self, source_id: Optional[str] = None, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            try:
+                q = self.client.table("discovered_moments").select("*")
+                if source_id:
+                    q = q.eq("source_id", source_id)
+                if status:
+                    q = q.eq("status", status)
+                res = q.order("score", desc=True).limit(limit).execute()
+                return res.data or []
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            where_clauses = []
+            params = []
+            if source_id:
+                where_clauses.append("source_id = ?")
+                params.append(source_id)
+            if status:
+                where_clauses.append("status = ?")
+                params.append(status)
+            where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            rows = conn.execute(
+                f"SELECT * FROM discovered_moments {where} ORDER BY score DESC LIMIT ?",
+                params + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_discovered_moment(self, moment_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            try:
+                res = self.client.table("discovered_moments").select("*").eq("id", moment_id).limit(1).execute()
+                return res.data[0] if res.data else None
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM discovered_moments WHERE id = ? LIMIT 1", (moment_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_discovered_moment_status(self, moment_id: str, status: str) -> bool:
+        if self.has_supabase:
+            try:
+                self.client.table("discovered_moments").update({"status": status}).eq("id", moment_id).execute()
+                return True
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            cur = conn.execute("UPDATE discovered_moments SET status = ? WHERE id = ?", (status, moment_id))
+            return cur.rowcount > 0
 
 
 db = DatabaseClient()
