@@ -361,17 +361,65 @@
 
         <!-- TAB 6: PUBLISHING QUEUE -->
         <section id="tab-publishing" class="tab-section">
-          <div class="card">
+          <!-- Platform Credentials & Connection Status -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title"><span>📱</span> TikTok (via Buffer Post Now)</div>
+                <span id="buffer-conn-badge" class="badge badge-warning">CHECKING</span>
+              </div>
+              <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
+                Direct immediate publishing to TikTok using Buffer Free API with now=True workflow. Daily target: 20 TikTok videos.
+              </p>
+              <div id="buffer-channel-info" style="font-size: 13px; margin-bottom: 16px; color: var(--accent-cyan);">
+                Channel: Loading...
+              </div>
+              <button id="btn-connect-buffer" class="btn btn-secondary btn-sm">Connect Buffer OAuth</button>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title"><span>📺</span> YouTube Shorts (Direct API)</div>
+                <span id="youtube-conn-badge" class="badge badge-warning">CHECKING</span>
+              </div>
+              <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
+                Direct video upload via official YouTube Data API v3 with gaming category & tags. Daily target: 20 YouTube Shorts.
+              </p>
+              <div id="youtube-channel-info" style="font-size: 13px; margin-bottom: 16px; color: var(--accent-cyan);">
+                Channel: Loading...
+              </div>
+              <button id="btn-connect-youtube" class="btn btn-secondary btn-sm">Connect Google YouTube OAuth</button>
+            </div>
+          </div>
+
+          <!-- Queue Control Bar -->
+          <div class="card" style="margin-bottom: 24px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+              <div>
+                <strong style="font-size: 16px;">Publishing Schedule Controls</strong>
+                <div style="color: var(--text-muted); font-size: 13px;">Internal schedule releases videos at spaced intervals.</div>
+              </div>
+              <div style="display: flex; gap: 12px;">
+                <button id="btn-dispatch-due" class="btn btn-secondary btn-sm"><span>⚡</span> Dispatch Due Now</button>
+                <button id="btn-reconcile-daily" class="btn btn-primary btn-sm"><span>🔄</span> Run 24h Daily Reconciliation</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Scheduled Publishing Queue Table -->
+          <div class="card" style="margin-bottom: 24px;">
             <div class="card-header">
-              <div class="card-title"><span>🚀</span> Scheduled Publishing Queue</div>
+              <div class="card-title"><span>🚀</span> Internal Publishing Queue</div>
+              <span id="queue-count-badge" class="badge badge-info">0 items</span>
             </div>
             <table class="data-table">
               <thead>
                 <tr>
                   <th>Clip ID</th>
-                  <th>Channel / Platform</th>
+                  <th>Platform</th>
                   <th>Scheduled For</th>
                   <th>Status</th>
+                  <th>Live URL / Provider ID</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -379,6 +427,17 @@
                 <!-- Injected via JavaScript -->
               </tbody>
             </table>
+          </div>
+
+          <!-- 24-Hour Daily Publication Reconciliation Report -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title"><span>📊</span> Latest 24-Hour Publication Reconciliation Report</div>
+              <span id="reconcile-health-badge" class="badge badge-success">HEALTHY</span>
+            </div>
+            <div id="reconciliation-report-container" style="color: var(--text-muted); font-size: 13px;">
+              <p>Click "Run 24h Daily Reconciliation" above to generate a consolidated status audit across TikTok and YouTube.</p>
+            </div>
           </div>
         </section>
 

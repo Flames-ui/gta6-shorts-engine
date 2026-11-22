@@ -32,8 +32,6 @@ async def update_autonomous_config(
 ):
     """Update autonomous pipeline configuration."""
     require_admin(auth)
-    if payload.is_active or payload.auto_publish:
-        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Autonomous ingestion and publishing are not connected")
     updated = autonomous_engine.update_config(payload.model_dump())
     return updated
 
@@ -52,4 +50,4 @@ async def trigger_autonomous_cycle(auth: AuthContext = Depends(verify_api_key)):
     try:
         return await autonomous_engine.run_autonomous_cycle()
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc

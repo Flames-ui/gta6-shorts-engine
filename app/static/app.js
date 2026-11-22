@@ -390,13 +390,180 @@ document.addEventListener("DOMContentLoaded", () => {
   // 6. Publishing Data
   async function loadPublishingData() {
     try {
-      const res = await fetch("/api/v1/publishing/channels", { headers });
-      const tbody = document.getElementById("publishing-queue-body");
-      if (tbody) {
-        tbody.innerHTML = `<tr><td colspan="5">Queue data is not exposed by the current API.</td></tr>`;
+      // 1. Fetch connected accounts
+      const accRes = await fetch("/api/v1/publishing/accounts", { headers });
+      let accounts = [];
+      if (accRes.ok) {
+        const accData = await accRes.json();
+        accounts = accData.accounts || [];
       }
+
+      // 2. Fetch connected channels (Buffer profiles)
+      const chRes = await fetch("/api/v1/publishing/channels", { headers });
+      let channels = [];
+      if (chRes.ok) {
+        const chData = await chRes.json();
+        channels = chData.channels || [];
+      }
+
+      // Update Buffer Status
+      const bufferAcc = accounts.find(a => a.service === "buffer");
+      const bufferBadge = document.getElementById("buffer-conn-badge");
+      const bufferInfo = document.getElementById("buffer-channel-info");
+      const tiktokCh = channels.find(c => c.service === "tiktok");
+
+      if (bufferBadge) {
+        if (bufferAcc || tiktokCh) {
+          bufferBadge.className = "badge badge-success";
+          bufferBadge.textContent = "CONNECTED";
+        } else {
+          bufferBadge.className = "badge badge-warning";
+          bufferBadge.textContent = "NOT CONNECTED";
+        }
+      }
+      if (bufferInfo) {
+        bufferInfo.textContent = tiktokCh ? `Connected Channel: @${tiktokCh.formatted_username}` : "No TikTok channel linked in Buffer yet.";
+      }
+
+      // Update YouTube Status
+      const ytAcc = accounts.find(a => a.service === "youtube");
+      const ytBadge = document.getElementById("youtube-conn-badge");
+      const ytInfo = document.getElementById("youtube-channel-info");
+
+      if (ytBadge) {
+        if (ytAcc && ytAcc.has_token) {
+          ytBadge.className = "badge badge-success";
+          ytBadge.textContent = "CONNECTED";
+        } else {
+          ytBadge.className = "badge badge-warning";
+          ytBadge.textContent = "NOT CONNECTED";
+        }
+      }
+      if (ytInfo) {
+        ytInfo.textContent = ytAcc ? `Connected Account: ${ytAcc.id}` : "No Google YouTube channel authorized yet.";
+      }
+
+      // 3. Fetch internal publishing queue
+      const qRes = await fetch("/api/v1/publishing/queue", { headers });
+      const tbody = document.getElementById("publishing-queue-body");
+      const qBadge = document.getElementById("queue-count-badge");
+
+      if (qRes.ok && tbody) {
+        const qData = await qRes.json();
+        const items = qData.items || [];
+        if (qBadge) qBadge.textContent = `${items.length} items`;
+
+        tbody.innerHTML = "";
+        if (items.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">No scheduled publications. Approve clips in the library or run the autonomous engine to schedule.</td></tr>`;
+        } else {
+          items.forEach(it => {
+            const row = document.createElement("tr");
+            const isPub = it.status === "published";
+            const liveUrl = it.published_url || (it.platform === "youtube" && it.platform_update_id ? `https://www.youtube.com/shorts/${it.platform_update_id}` : null);
+            const statusBadgeClass = isPub ? "badge-success" : (it.status === "failed" ? "badge-danger" : (it.status === "publishing" ? "badge-warning" : "badge-info"));
+
+            row.innerHTML = `
+              <td><strong>${escapeHTML(it.clip_id || it.id)}</strong></td>
+              <td><span class="badge ${it.platform === "youtube" ? "badge-danger" : "badge-info"}">${escapeHTML(it.platform ? it.platform.toUpperCase() : "TIKTOK")}</span></td>
+              <td style="font-size: 12px; color: var(--text-muted);">${escapeHTML(it.scheduled_for ? it.scheduled_for.replace("T", " ").slice(0, 19) : "Immediate")}</td>
+              <td><span class="badge ${statusBadgeClass}">${escapeHTML(it.status || "scheduled")}</span></td>
+              <td style="font-size: 12px;">${liveUrl ? `<a href="${escapeHTML(liveUrl)}" target="_blank" style="color: var(--accent-cyan); text-decoration: underline;">View Post</a>` : (it.platform_update_id ? escapeHTML(it.platform_update_id) : "—")}</td>
+              <td>
+                ${!isPub ? `<button class="btn btn-primary btn-sm" data-publish-now="${escapeHTML(it.id)}" data-clip="${escapeHTML(it.clip_id)}" data-plat="${escapeHTML(it.platform || "tiktok")}">Publish Now</button>` : `<span style="color: var(--accent-emerald); font-size: 12px;">✓ Published</span>`}
+              </td>
+            `;
+
+            const pubBtn = row.querySelector("button[data-publish-now]");
+            if (pubBtn) {
+              pubBtn.addEventListener("click", async () => {
+                pubBtn.disabled = true;
+                pubBtn.textContent = "Publishing...";
+                try {
+                  const pRes = await fetch("/api/v1/publishing/publish-now", {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({ clip_id: it.clip_id, platform: it.platform || "tiktok" }),
+                  });
+                  const pData = await pRes.json();
+                  if (pRes.ok && pData.success) {
+                    alert(`Published successfully to ${it.platform}!`);
+                  } else {
+                    alert(`Publishing response: ${pData.error || pData.status || "Completed"}`);
+                  }
+                  loadPublishingData();
+                } catch (err) {
+                  alert(`Error: ${err.message}`);
+                  pubBtn.disabled = false;
+                  pubBtn.textContent = "Publish Now";
+                }
+              });
+            }
+
+            tbody.appendChild(row);
+          });
+        }
+      }
+
+      // 4. Load latest reconciliation report
+      loadReconciliationReport();
+
     } catch (e) {
       console.warn("Publishing load error:", e);
+    }
+  }
+
+  async function loadReconciliationReport() {
+    try {
+      const repRes = await fetch("/api/v1/publishing/reconciliation-reports?limit=1", { headers });
+      if (repRes.ok) {
+        const repData = await repRes.json();
+        const reports = repData.reports || [];
+        const container = document.getElementById("reconciliation-report-container");
+        const healthBadge = document.getElementById("reconcile-health-badge");
+
+        if (container && reports.length > 0) {
+          const r = reports[0];
+          if (healthBadge) {
+            healthBadge.className = `badge ${r.system_health === "healthy" ? "badge-success" : "badge-warning"}`;
+            healthBadge.textContent = (r.system_health || "HEALTHY").toUpperCase();
+          }
+
+          container.innerHTML = `
+            <div style="background: var(--bg-surface); padding: 16px; border-radius: 8px; border: 1px solid var(--border-subtle); margin-top: 8px;">
+              <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+                <span><strong>Cycle ID:</strong> ${escapeHTML(r.id)}</span>
+                <span style="color: var(--text-dim);">${escapeHTML(r.generated_at ? r.generated_at.replace("T", " ").slice(0, 19) : "")} UTC</span>
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px;">
+                <div style="background: var(--bg-deep); padding: 10px; border-radius: 6px;">
+                  <div style="font-size: 11px; color: var(--text-dim);">TOTAL CHECKED</div>
+                  <div style="font-size: 18px; font-weight: bold;">${r.total_scheduled}</div>
+                </div>
+                <div style="background: var(--bg-deep); padding: 10px; border-radius: 6px;">
+                  <div style="font-size: 11px; color: var(--text-dim);">CONFIRMED PUBLISHED</div>
+                  <div style="font-size: 18px; font-weight: bold; color: var(--accent-emerald);">${r.total_published}</div>
+                </div>
+                <div style="background: var(--bg-deep); padding: 10px; border-radius: 6px;">
+                  <div style="font-size: 11px; color: var(--text-dim);">FAILED</div>
+                  <div style="font-size: 18px; font-weight: bold; color: var(--accent-pink);">${r.total_failed}</div>
+                </div>
+                <div style="background: var(--bg-deep); padding: 10px; border-radius: 6px;">
+                  <div style="font-size: 11px; color: var(--text-dim);">TIKTOK / YOUTUBE</div>
+                  <div style="font-size: 18px; font-weight: bold;">${r.tiktok_summary ? r.tiktok_summary.confirmed_published : 0} / ${r.youtube_summary ? r.youtube_summary.confirmed_published : 0}</div>
+                </div>
+              </div>
+              ${r.alerts && r.alerts.length > 0 ? `
+                <div style="margin-top: 10px; padding: 8px 12px; background: rgba(244, 63, 94, 0.15); border-left: 3px solid var(--accent-pink); border-radius: 4px; font-size: 12px;">
+                  ${r.alerts.map(a => `<div>⚠️ ${escapeHTML(a)}</div>`).join("")}
+                </div>
+              ` : `<div style="color: var(--accent-emerald); font-size: 12px;">✓ All scheduled items reconciled with remote providers. No sync discrepancies.</div>`}
+            </div>
+          `;
+        }
+      }
+    } catch (e) {
+      console.warn("Reconciliation report load error:", e);
     }
   }
 
@@ -432,3 +599,78 @@ document.addEventListener("DOMContentLoaded", () => {
   setupSSE();
   loadStudioData();
 });
+    // Connect Buffer OAuth
+    const btnBuffer = document.getElementById("btn-connect-buffer");
+    if (btnBuffer) {
+      btnBuffer.addEventListener("click", async () => {
+        try {
+          const res = await fetch("/api/v1/publishing/buffer/connect", { headers });
+          const data = await res.json();
+          if (res.ok && data.auth_url) {
+            window.open(data.auth_url, "_blank");
+          } else {
+            alert(`Buffer Connect: ${data.detail || "Unable to generate OAuth URL"}`);
+          }
+        } catch (e) {
+          alert(`Buffer Connect Error: ${e.message}`);
+        }
+      });
+    }
+
+    // Connect YouTube OAuth
+    const btnYouTube = document.getElementById("btn-connect-youtube");
+    if (btnYouTube) {
+      btnYouTube.addEventListener("click", async () => {
+        try {
+          const res = await fetch("/api/v1/publishing/youtube/connect", { headers });
+          const data = await res.json();
+          if (res.ok && data.authorization_url) {
+            window.open(data.authorization_url, "_blank");
+          } else {
+            alert(`YouTube Connect: ${data.detail || "Unable to generate OAuth URL"}`);
+          }
+        } catch (e) {
+          alert(`YouTube Connect Error: ${e.message}`);
+        }
+      });
+    }
+
+    // Dispatch Due Publications
+    const btnDispatch = document.getElementById("btn-dispatch-due");
+    if (btnDispatch) {
+      btnDispatch.addEventListener("click", async () => {
+        btnDispatch.disabled = true;
+        try {
+          const res = await fetch("/api/v1/publishing/dispatch-due", { method: "POST", headers });
+          const data = await res.json();
+          alert(`Dispatched ${data.dispatched || 0} due items.`);
+          loadPublishingData();
+        } catch (e) {
+          alert(`Dispatch Error: ${e.message}`);
+        } finally {
+          btnDispatch.disabled = false;
+        }
+      });
+    }
+
+    // Run 24h Daily Reconciliation
+    const btnReconcile = document.getElementById("btn-reconcile-daily");
+    if (btnReconcile) {
+      btnReconcile.addEventListener("click", async () => {
+        btnReconcile.disabled = true;
+        btnReconcile.textContent = "Reconciling...";
+        try {
+          const res = await fetch("/api/v1/publishing/reconcile-daily?lookback_hours=24", { method: "POST", headers });
+          const data = await res.json();
+          alert(`Reconciliation finished: ${data.total_published} confirmed published, ${data.total_failed} failed.`);
+          loadPublishingData();
+        } catch (e) {
+          alert(`Reconciliation Error: ${e.message}`);
+        } finally {
+          btnReconcile.disabled = false;
+          btnReconcile.textContent = "Run 24h Daily Reconciliation";
+        }
+      });
+    }
+
+    

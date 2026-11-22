@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     LOCAL_WHISPER_MODEL: str = Field(default="base", description="Whisper model: tiny, base, small, medium, large-v3")
     LOCAL_WHISPER_DEVICE: str = Field(default="auto", description="Whisper device: auto, cpu, cuda")
     LOCAL_OUTPUT_DIR: str = Field(default="output", description="Local directory for temporary renders")
+    OUTPUT_DIR: str = Field(default="output", description="Output directory alias")
     DEFAULT_NUM_CLIPS: int = Field(default=3, description="Default number of clips to extract")
     DEFAULT_ASPECT_RATIO: str = Field(default="9:16", description="Default video aspect ratio")
 

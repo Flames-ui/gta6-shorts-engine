@@ -231,6 +231,7 @@ class DatabaseClient:
                     platform_update_id TEXT,
                     error_message TEXT,
                     retry_count INTEGER DEFAULT 0,
+                    privacy_status TEXT DEFAULT 'private',
                     created_at TEXT,
                     updated_at TEXT,
                     UNIQUE(clip_id, channel_id)
@@ -330,6 +331,10 @@ class DatabaseClient:
                     created_at TEXT
                 );
             """)
+            try:
+                conn.execute("ALTER TABLE publishing_queue ADD COLUMN privacy_status TEXT DEFAULT 'private'")
+            except Exception:
+                pass
 
     # -------------------------------------------------------------------------
     # Jobs CRUD
@@ -537,19 +542,19 @@ class DatabaseClient:
                 """,
                 (
                     clip_data["id"],
-                    clip_data["job_id"],
+                    clip_data.get("job_id", "job_manual"),
                     clip_data.get("user_id"),
                     clip_data.get("category_id", "gaming"),
-                    clip_data["title"],
+                    clip_data.get("title", "Untitled Clip"),
                     clip_data.get("hook_sentence"),
                     clip_data.get("virality_reason"),
                     clip_data.get("score", 0),
-                    clip_data["start_time"],
-                    clip_data["end_time"],
-                    clip_data["duration"],
+                    float(clip_data.get("start_time", 0.0)),
+                    float(clip_data.get("end_time", clip_data.get("duration", 30.0))),
+                    float(clip_data.get("duration", 30.0)),
                     clip_data.get("aspect_ratio", "9:16"),
-                    clip_data.get("storage_path"),
-                    clip_data["storage_url"],
+                    clip_data.get("storage_path") or clip_data.get("file_path"),
+                    clip_data.get("storage_url") or clip_data.get("storage_path") or clip_data.get("file_path") or "",
                     clip_data.get("thumbnail_url"),
                     clip_data.get("publishing_status", "draft"),
                     json.dumps(clip_data.get("suggested_tags", [])),
@@ -610,13 +615,22 @@ class DatabaseClient:
             return res.data[0] if res.data else None
 
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            cursor = conn.execute("PRAGMA table_info(clips)")
+            cols = {row[1] for row in cursor.fetchall()}
+            cleaned_updates = {}
+            for k, v in updates.items():
+                if k == "status" and "status" not in cols and "publishing_status" in cols:
+                    cleaned_updates["publishing_status"] = v
+                elif k in cols:
+                    cleaned_updates[k] = v
             set_clauses = []
             vals = []
-            for k, v in updates.items():
+            for k, v in cleaned_updates.items():
                 set_clauses.append(f"{k} = ?")
                 vals.append(json.dumps(v) if isinstance(v, (list, dict)) else v)
-            vals.append(clip_id)
-            conn.execute(f"UPDATE clips SET {', '.join(set_clauses)} WHERE id = ?", vals)
+            if set_clauses:
+                vals.append(clip_id)
+                conn.execute(f"UPDATE clips SET {', '.join(set_clauses)} WHERE id = ?", vals)
         return self.get_clip(clip_id)
 
     def _format_clip_row(self, row: Optional[sqlite3.Row]) -> Dict[str, Any]:
@@ -1040,13 +1054,13 @@ class DatabaseClient:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO publishing_queue
-                (id, clip_id, channel_id, user_id, platform, scheduled_for, status, platform_update_id, error_message, retry_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, clip_id, channel_id, user_id, platform, scheduled_for, status, platform_update_id, error_message, retry_count, privacy_status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item_data["id"],
                     item_data["clip_id"],
-                    item_data["channel_id"],
+                    item_data.get("channel_id", f"{item_data.get('platform', 'default')}_channel"),
                     item_data.get("user_id"),
                     item_data["platform"],
                     item_data["scheduled_for"],
@@ -1054,11 +1068,15 @@ class DatabaseClient:
                     item_data.get("platform_update_id"),
                     item_data.get("error_message"),
                     item_data.get("retry_count", 0),
+                    item_data.get("privacy_status", "private"),
                     now_iso,
                     now_iso,
                 ),
             )
         return item_data
+
+    def add_to_publishing_queue(self, item_data: Dict[str, Any]) -> Dict[str, Any]:
+        return self.create_publishing_queue_item(item_data)
 
     def list_publishing_queue(
         self,
