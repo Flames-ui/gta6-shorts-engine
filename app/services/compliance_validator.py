@@ -260,17 +260,18 @@ class ComplianceValidator:
             cand_start = meta.get("start_time")
             cand_end = meta.get("end_time")
             for ex in existing_clips:
-                if ex.get("id") != clip_id:
+                ex_id = ex.get("id")
+                if ex_id != clip_id:
                     if video_path and ex.get("video_path") == video_path:
                         checks["duplicate_check"] = False
-                        failure_reasons.append(f"Duplicate video file path matching clip {ex.get("id")}.")
+                        failure_reasons.append(f"Duplicate video file path matching clip {ex_id}.")
                         break
                     ex_start = ex.get("start_time")
                     ex_end = ex.get("end_time")
                     if cand_start is not None and cand_end is not None and ex_start is not None and ex_end is not None:
                         if abs(float(cand_start) - float(ex_start)) < 1.0 and abs(float(cand_end) - float(ex_end)) < 1.0:
                             checks["duplicate_check"] = False
-                            failure_reasons.append(f"Duplicate highlight timing matches existing clip {ex.get("id")}.")
+                            failure_reasons.append(f"Duplicate highlight timing matches existing clip {ex_id}.")
                             break
 
         is_compliant = (len(failure_reasons) == 0) and bool(details.get("file_exists"))

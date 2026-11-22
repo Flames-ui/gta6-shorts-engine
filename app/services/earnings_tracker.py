@@ -175,7 +175,7 @@ class EarningsTracker:
         total_views = sum(int(s.get("eligible_views") or 0) for s in submissions)
         total_estimated = sum(float(s.get("estimated_rewards") or 0.0) for s in submissions)
         total_pending = sum(float(s.get("pending_rewards") or 0.0) for s in submissions)
-        verified_submissions = [s for s in submissions if s.get("marketplace_reward_ref") and s.get("verified_by") and str(s.get("evidence_source") or "").startswith("marketplace_reward:")]
+        verified_submissions = [s for s in submissions if s.get("verified_by") and (s.get("marketplace_reward_ref") or str(s.get("evidence_source") or "").startswith("marketplace_reward:") or str(s.get("evidence_source") or "") in ("manual_audit", "marketplace_dashboard_export", "operator_audit"))]
         total_approved = sum(float(s.get("approved_rewards") or 0.0) for s in verified_submissions)
         total_rejected = sum(float(s.get("rejected_rewards") or 0.0) for s in submissions)
         total_withdrawable = sum(float(s.get("withdrawable_earnings") or 0.0) for s in verified_submissions)
@@ -187,7 +187,7 @@ class EarningsTracker:
         for s in submissions:
             ver_at_str = s.get("last_verified_at")
             app_amt = float(s.get("approved_rewards") or 0.0)
-            if (s.get("marketplace_reward_ref") and s.get("verified_by") and str(s.get("evidence_source") or "").startswith("marketplace_reward:") and app_amt > 0 and ver_at_str):
+            if (s.get("verified_by") and (s.get("marketplace_reward_ref") or str(s.get("evidence_source") or "").startswith("marketplace_reward:") or str(s.get("evidence_source") or "") in ("manual_audit", "marketplace_dashboard_export", "operator_audit")) and app_amt > 0 and ver_at_str):
                 try:
                     v_dt = datetime.fromisoformat(str(ver_at_str).replace("Z", "+00:00"))
                     if v_dt >= thirty_days_ago:
