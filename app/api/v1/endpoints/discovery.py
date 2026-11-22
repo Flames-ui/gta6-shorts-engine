@@ -1,8 +1,9 @@
 """Content discovery and source licensing management endpoints."""
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ....auth import AuthContext, enforce_resource_ownership, require_admin, verify_api_key
@@ -14,7 +15,13 @@ from ....schemas import (
 )
 from ....services.discovery.base import AUTHORIZED_RIGHTS_STATUSES, RightsStatus
 from ....services.discovery.rights_manager import rights_manager
+from ....services.discovery.poll_eligibility import PollDecision, as_flag, evaluate_poll_eligibility
 from ....services.discovery.rss_adapter import RSSDiscoveryAdapter
+from ....services.discovery.youtube_channel_adapter import (
+    YOUTUBE_SOURCE_TYPES,
+    YouTubeChannelAdapter,
+    YouTubeDiscoveryError,
+)
 from ....services.supabase_client import db
 
 logger = logging.getLogger("gta6_shorts.discovery")
@@ -336,10 +343,15 @@ async def poll_content_sources(
     auth: AuthContext = Depends(verify_api_key),
 ):
     """
-    Actively trigger content discovery polling across registered active sources.
-    Performs URL normalization, deduplication, content classification, and source health updates.
+    Poll discovery sources that are active and have usable authorized rights.
+
+    Every candidate is checked against is_active, rights_status, revocation, expiry and its source
+    configuration. Excluded sources are returned with a reason code and are never fetched. A source
+    counts as polled only when a fetch was attempted; failures are recorded on the source and counted
+    as errors. auto_clip_enabled does not gate polling.
     """
     user_id = None if auth.is_admin else auth.user_id
+    now = datetime.now(timezone.utc)
     if source_id:
         src = db.get_source(source_id)
         if not src:
@@ -349,58 +361,123 @@ async def poll_content_sources(
     else:
         sources = db.list_sources(user_id=user_id, category_id=category_id, active_only=True)
 
+    # Selection: one decision per candidate, each with a reason when excluded.
+    eligible: List[Dict] = []
+    excluded: List[PollDecision] = []
+    for src in sources:
+        decision = evaluate_poll_eligibility(src, rights_manager.get_permission(str(src.get("id"))), now)
+        if decision.eligible:
+            eligible.append(src)
+        else:
+            excluded.append(decision)
+
+    active_count = sum(1 for s in sources if as_flag(s.get("is_active")))
+    auto_clip_count = sum(1 for s in sources if as_flag(s.get("auto_clip_enabled")))
+    logger.info("discovery.poll.selection %s", json.dumps({
+        "source_id_filter": source_id,
+        "category_id_filter": category_id,
+        "user_scope": user_id or "all",
+        "candidate_sources": len(sources),
+        "active_sources": active_count,
+        "auto_clip_enabled_sources": auto_clip_count,
+        "eligible_sources": len(eligible),
+        "eligible_source_ids": [str(s.get("id")) for s in eligible],
+        "excluded_sources": [d.as_dict() for d in excluded],
+    }, default=str))
+
     rss_adapter = RSSDiscoveryAdapter()
+    youtube_adapter = YouTubeChannelAdapter()
     from ....services.discovery.duplicate_detector import duplicate_detector
 
     total_polled = 0
     new_items_count = 0
     duplicates_count = 0
     errors_count = 0
+    source_results: List[Dict] = []
 
     existing_content = db.list_discovered_content(user_id=user_id, limit=200)
     seen_urls = {duplicate_detector.normalize_url(it.get("original_url") or "") for it in existing_content if it.get("original_url")}
 
-    for src in sources:
-        permission = rights_manager.get_permission(src["id"])
-        if not permission or permission.get("rights_status") not in (RightsStatus.AUTHORIZED_EDITING, RightsStatus.AUTHORIZED_PLATFORMS):
-            continue
-        if src.get("source_type") in ("approved_rss", "rss") and src.get("feed_url"):
-            total_polled += 1
-            try:
+    for src in eligible:
+        sid = str(src["id"])
+        source_type = str(src.get("source_type") or "").strip().lower()
+        use_channel = source_type in YOUTUBE_SOURCE_TYPES and bool(str(src.get("channel_url") or "").strip())
+        permission = rights_manager.get_permission(sid) or {}
+        rights_status = RightsStatus(permission.get("rights_status"))
+
+        total_polled += 1
+        attempted_at = datetime.now(timezone.utc).isoformat()
+        new_for_source = 0
+        dup_for_source = 0
+        result = {"source_id": sid, "route": "youtube_channel" if use_channel else "rss", "last_polled_at": attempted_at}
+        try:
+            if use_channel:
+                discovered = youtube_adapter.discover_content(src, limit=10, rights_status=rights_status)
+                success_at = datetime.now(timezone.utc).isoformat()
+                db.update_source_health(sid, status="healthy", last_polled_at=attempted_at,
+                                        last_success_at=success_at, error="", reset_failures=True)
+                result.update({"health_written_by": "poll", "last_success_at": success_at, "last_error": None})
+            else:
+                # The RSS adapter writes its own health update on success or failure.
                 discovered = rss_adapter.discover_content(src, limit=10)
-                for item in discovered:
-                    norm_url = duplicate_detector.normalize_url(item.original_url or "")
-                    if norm_url and norm_url in seen_urls:
-                        duplicates_count += 1
-                        continue
+                result.update({"health_written_by": "rss_adapter"})
 
-                    db.save_discovered_content({
-                        "id": item.id,
-                        "source_id": src["id"],
-                        "user_id": src.get("user_id"),
-                        "title": item.title,
-                        "original_url": item.original_url,
-                        "media_url": item.media_url,
-                        "creator_name": item.creator_name,
-                        "category_id": src.get("category_id", "gaming"),
-                        "rights_status": item.rights_status.value,
-                        "duration_seconds": 0.0,
-                        "discovery_time": datetime.now(timezone.utc).isoformat(),
-                        "is_processed": False,
-                    })
-                    if norm_url:
-                        seen_urls.add(norm_url)
-                    new_items_count += 1
-            except Exception as exc:
-                logger.warning("Polling error on source %s: %s", src["id"], exc)
-                errors_count += 1
+            for item in discovered:
+                norm_url = duplicate_detector.normalize_url(item.original_url or "")
+                if norm_url and norm_url in seen_urls:
+                    duplicates_count += 1
+                    dup_for_source += 1
+                    continue
 
-    return {
+                db.save_discovered_content({
+                    "id": item.id,
+                    "source_id": sid,
+                    "user_id": src.get("user_id"),
+                    "title": item.title,
+                    "original_url": item.original_url,
+                    "media_url": item.media_url,
+                    "creator_name": item.creator_name,
+                    "category_id": src.get("category_id", "gaming"),
+                    "rights_status": item.rights_status.value,
+                    "duration_seconds": 0.0,
+                    "discovery_time": datetime.now(timezone.utc).isoformat(),
+                    "is_processed": False,
+                })
+                if norm_url:
+                    seen_urls.add(norm_url)
+                new_items_count += 1
+                new_for_source += 1
+            result.update({"outcome": "polled", "new_items": new_for_source, "duplicates_skipped": dup_for_source})
+        except YouTubeDiscoveryError as exc:
+            errors_count += 1
+            message = f"{exc.code}: {exc}"
+            db.update_source_health(sid, status="error", last_polled_at=attempted_at, error=message, increment_failures=True)
+            result.update({"outcome": "error", "last_success_at": None, "last_error": message})
+            logger.warning("discovery.poll.source_error %s", json.dumps({"source_id": sid, "code": exc.code, "error": str(exc)}))
+        except Exception as exc:
+            errors_count += 1
+            message = f"unexpected_error: {type(exc).__name__}: {exc}"[:500]
+            db.update_source_health(sid, status="error", last_polled_at=attempted_at, error=message, increment_failures=True)
+            result.update({"outcome": "error", "last_success_at": None, "last_error": message})
+            logger.warning("discovery.poll.source_error %s", json.dumps({"source_id": sid, "error": message}))
+
+        source_results.append(result)
+        logger.info("discovery.poll.source_result %s", json.dumps(result, default=str))
+
+    response = {
         "polled_sources": total_polled,
         "new_items_discovered": new_items_count,
         "duplicates_skipped": duplicates_count,
         "errors": errors_count,
+        "candidate_sources": len(sources),
+        "active_sources": active_count,
+        "auto_clip_enabled_sources": auto_clip_count,
+        "eligible_sources": len(eligible),
+        "excluded_sources": [d.as_dict() for d in excluded],
+        "source_results": source_results,
     }
+    logger.info("discovery.poll.result %s", json.dumps(response, default=str))
+    return response
 
 
 # -------------------------------------------------------------------------

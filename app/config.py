@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     YOUTUBE_CLIENT_ID: str = Field(default="", description="Google Cloud OAuth Client ID")
     YOUTUBE_CLIENT_SECRET: str = Field(default="", description="Google Cloud OAuth Client Secret")
     YOUTUBE_REDIRECT_URI: str = Field(default="", description="Google OAuth Redirect URI")
+    YOUTUBE_API_KEY: str = Field(default="", description="YouTube Data API key; only needed to resolve @handle and legacy channel URLs")
 
     # Production Limits & Scheduling
     DAILY_TARGET_MIN: int = Field(default=3, description="Target minimum daily videos (Milestones 2.2 & 3: 3-5 target)")
