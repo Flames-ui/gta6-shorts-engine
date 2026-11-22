@@ -43,3 +43,15 @@ if not os.path.exists(sample_vid):
         sample_vid
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+test_footage = "/tmp/test_assets/test_footage_1080p.mp4"
+if not os.path.exists(test_footage):
+    cmd2 = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=5:size=1920x1080:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=5",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        test_footage
+    ]
+    subprocess.run(cmd2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

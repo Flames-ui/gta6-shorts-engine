@@ -3,7 +3,7 @@ import logging
 import secrets
 from typing import Any, Dict, Optional
 import jwt
-from fastapi import Header, HTTPException, Security, status
+from fastapi import Header, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -105,6 +105,7 @@ def verify_supabase_jwt(token: str) -> Optional[Dict[str, Any]]:
 
 
 async def verify_api_key(
+    request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     bearer: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
 ) -> AuthContext:
@@ -133,6 +134,23 @@ async def verify_api_key(
         token = x_api_key.strip()
     elif bearer and bearer.credentials:
         token = bearer.credentials.strip()
+
+    # Check for valid operator session cookie
+    if not token and request is not None:
+        session_id = request.cookies.get("session_id")
+        if session_id:
+            from .services.supabase_client import db
+            sess = db.get_session(session_id)
+            if sess:
+                exp = sess.get("expires_at")
+                from datetime import datetime, timezone
+                if not exp or exp >= datetime.now(timezone.utc).isoformat():
+                    return AuthContext(
+                        user_id=sess.get("user_id", "system_admin"),
+                        role=sess.get("role", "admin"),
+                        is_admin=bool(sess.get("is_admin", True)),
+                        auth_method="session_cookie",
+                    )
 
     # In development / test with no configured key, allow a mock context only if no key was passed
     if not configured_key and not is_prod:

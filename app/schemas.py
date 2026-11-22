@@ -720,3 +720,16 @@ class PublicationPackageRequest(BaseModel):
     candidate_metadata: Dict[str, Any]
     editing_plan: Dict[str, Any]
     target_platform: str = "tiktok"
+
+
+class DashboardLoginRequest(BaseModel):
+    api_key: Optional[str] = None
+    token: Optional[str] = None
+
+
+class ConfirmRewardRequest(BaseModel):
+    submission_id: str
+    reward_amount: float
+    marketplace_ref: str
+    eligible_views: Optional[int] = None
+    notes: Optional[str] = None

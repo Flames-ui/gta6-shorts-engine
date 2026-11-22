@@ -226,3 +226,4 @@ def test_dashboard_login_sets_cookie_and_csrf_protects_mutations(client):
     with_token = client.post("/api/v1/campaigns/rewards/confirm", json={"submission_id": "missing",
         "reward_amount": 10, "marketplace_ref": "ref-with-csrf"}, headers={"X-CSRF-Token": token})
     assert with_token.status_code in (400, 404)
+    client.cookies.clear()

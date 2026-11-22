@@ -13,6 +13,7 @@ from ....schemas import (
     CampaignImportRequest,
     CampaignListResponse,
     CampaignResponse,
+    ConfirmRewardRequest,
     CampaignReviewRequest,
     CampaignSourceRequest,
     CampaignSourceResponse,
@@ -520,3 +521,30 @@ async def get_earnings_summary(
     Strictly separates pending from confirmed rewards.
     """
     return earnings_tracker.get_summary()
+
+
+@router.post("/rewards/confirm", response_model=Dict[str, Any])
+async def confirm_marketplace_reward(
+    payload: ConfirmRewardRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Confirm a verified marketplace reward with idempotency and financial validation."""
+    submission = db.get_clip_submission(payload.submission_id)
+    if not submission:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Submission {payload.submission_id} not found",
+        )
+    try:
+        res = earnings_tracker.record_marketplace_reward(
+            submission_id=payload.submission_id,
+            reward_amount=payload.reward_amount,
+            marketplace_reference=payload.marketplace_ref,
+            operator_id=auth.user_id,
+            eligible_views=payload.eligible_views,
+            notes=payload.notes,
+            raise_on_error=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return res

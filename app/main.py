@@ -2,6 +2,7 @@
 from .services.rate_limiter import rate_limiter
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,6 +51,7 @@ app = FastAPI(
 # -----------------------------------------------------------------------------
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    path = request.url.path
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -60,6 +62,23 @@ async def security_middleware(request: Request, call_next):
                 )
         except ValueError:
             pass
+
+    # CSRF protection for cookie-session authenticated mutating requests
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if not (path.startswith("/api/v1/auth/login") or path.startswith("/api/v1/auth/logout") or path.endswith("/callback")):
+            session_id = request.cookies.get("session_id")
+            has_api_key = bool(request.headers.get("X-API-Key") or request.headers.get("Authorization"))
+            if session_id and not has_api_key:
+                from .services.supabase_client import db
+                sess = db.get_session(session_id)
+                if sess:
+                    csrf_header = request.headers.get("X-CSRF-Token") or request.headers.get("x-csrf-token")
+                    expected_csrf = sess.get("csrf_token")
+                    if not csrf_header or not expected_csrf or not secrets.compare_digest(csrf_header, expected_csrf):
+                        return JSONResponse(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            content={"detail": "CSRF validation failed: missing or invalid X-CSRF-Token header."},
+                        )
 
     # Rate limiting on API paths (exempting load balancer health probes and documentation)
     path = request.url.path

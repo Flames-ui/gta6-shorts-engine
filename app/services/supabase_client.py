@@ -2189,7 +2189,8 @@ class DatabaseClient:
             if not set_clauses:
                 return self.get_campaign(campaign_id)
             values.append(campaign_id)
-            cursor.execute(f'UPDATE campaigns SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
+            clause_str = ', '.join(set_clauses)
+            cursor.execute(f'UPDATE campaigns SET {clause_str} WHERE id = ?', tuple(values))
             conn.commit()
         return self.get_campaign(campaign_id)
 
@@ -2218,7 +2219,7 @@ class DatabaseClient:
                 source_data['source_url'],
                 source_data.get('original_creator', 'Unknown'),
                 source_data.get('source_type', 'campaign_provided'),
-                source_data.get('permission_evidence', ''),
+                json.dumps(source_data.get('permission_evidence')) if isinstance(source_data.get('permission_evidence'), (dict, list)) else (source_data.get('permission_evidence') or ''),
                 json.dumps(source_data.get('allowed_derivative_uses') or ['short_form_clipping']),
                 json.dumps(source_data.get('authorized_platforms') or ['tiktok']),
                 source_data.get('permission_expiry'),
@@ -2301,7 +2302,8 @@ class DatabaseClient:
                 else:
                     values.append(v)
             values.append(source_id)
-            cursor.execute(f'UPDATE campaign_sources SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
+            clause_str = ', '.join(set_clauses)
+            cursor.execute(f'UPDATE campaign_sources SET {clause_str} WHERE id = ?', tuple(values))
             conn.commit()
         return self.get_campaign_source(source_id)
 
@@ -2510,7 +2512,8 @@ class DatabaseClient:
             if not set_clauses:
                 return self.get_clip_submission(submission_id)
             values.append(submission_id)
-            cursor.execute(f'UPDATE clip_submissions SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
+            clause_str = ', '.join(set_clauses)
+            cursor.execute(f'UPDATE clip_submissions SET {clause_str} WHERE id = ?', tuple(values))
             conn.commit()
         return self.get_clip_submission(submission_id)
 

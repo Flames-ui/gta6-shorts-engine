@@ -5,7 +5,7 @@
 -- 1. Create clip_inspections table
 CREATE TABLE IF NOT EXISTS clip_inspections (
     id TEXT PRIMARY KEY,
-    clip_id TEXT NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    clip_id TEXT NOT NULL REFERENCES public.generated_clips(id) ON DELETE CASCADE,
     campaign_id TEXT REFERENCES campaigns(id) ON DELETE SET NULL,
     video_path TEXT NOT NULL,
     gate_a_passed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -37,8 +37,11 @@ CREATE TABLE IF NOT EXISTS operator_audit_logs (
 ALTER TABLE candidate_evaluations ADD COLUMN IF NOT EXISTS source_duration REAL;
 ALTER TABLE candidate_evaluations ADD COLUMN IF NOT EXISTS is_selected BOOLEAN DEFAULT FALSE;
 
-ALTER TABLE clips ADD COLUMN IF NOT EXISTS storage_path TEXT;
-ALTER TABLE clips ADD COLUMN IF NOT EXISTS publishing_status TEXT DEFAULT 'awaiting_approval';
+ALTER TABLE public.generated_clips ADD COLUMN IF NOT EXISTS storage_path TEXT;
+ALTER TABLE public.generated_clips ADD COLUMN IF NOT EXISTS publishing_status TEXT DEFAULT 'awaiting_approval';
+
+-- Ensure the public.clips view remains aligned with public.generated_clips
+CREATE OR REPLACE VIEW public.clips WITH (security_invoker = true) AS SELECT * FROM public.generated_clips;
 
 ALTER TABLE clip_submissions ADD COLUMN IF NOT EXISTS marketplace_reward_ref TEXT;
 ALTER TABLE clip_submissions ADD COLUMN IF NOT EXISTS withdrawn_earnings NUMERIC(10, 2) DEFAULT 0.00;
