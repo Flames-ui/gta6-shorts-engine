@@ -65,10 +65,22 @@ class DatabaseClient:
         else:
             self.session_db_path = os.path.join(settings.LOCAL_OUTPUT_DIR, "operator_sessions.sqlite3")
 
-        # In production, verify session persistence path configuration
-        if is_prod and not settings.SESSION_DB_PATH and not os.path.isdir("/var/data"):
-            logger.critical("FATAL: SESSION_DB_PATH must be configured in production for persistent operator sessions.")
-            raise RuntimeError("FATAL: SESSION_DB_PATH must be configured in production.")
+        # Automatically ensure parent directory exists for session database
+        parent_dir = os.path.dirname(self.session_db_path)
+        if parent_dir:
+            try:
+                os.makedirs(parent_dir, exist_ok=True)
+            except Exception as e:
+                logger.error("Failed to create parent directory for session database (%s): %s", parent_dir, e)
+
+        # In production, enforce that persistent session storage is configured and fail-closed
+        if is_prod:
+            if not self.has_supabase and not settings.SESSION_DB_PATH:
+                logger.critical("FATAL: In production, either Supabase or SESSION_DB_PATH must be configured.")
+                raise RuntimeError("FATAL: SESSION_DB_PATH must be configured in production.")
+            if not os.path.exists(parent_dir) or not os.access(parent_dir, os.W_OK):
+                logger.critical("FATAL: Session database directory %s does not exist or is not writable in production.", parent_dir)
+                raise RuntimeError("FATAL: SESSION_DB_PATH directory must be writable in production.")
 
         self._init_session_db()
 
@@ -2854,6 +2866,24 @@ class DatabaseClient:
             raise ValueError("session_id is required")
         session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
+        # If Supabase is active, persist to cloud PostgreSQL
+        if self.has_supabase:
+            try:
+                record = {
+                    "session_hash": session_hash,
+                    "user_id": session_data.get("user_id", "system_admin"),
+                    "role": session_data.get("role", "admin"),
+                    "is_admin": bool(session_data.get("is_admin", True)),
+                    "csrf_token": session_data.get("csrf_token", ""),
+                    "created_at": session_data.get("created_at"),
+                    "expires_at": session_data.get("expires_at"),
+                    "ip_address": session_data.get("ip_address"),
+                }
+                self.client.table("dashboard_sessions").upsert(record, on_conflict="session_hash").execute()
+            except Exception as e:
+                logger.warning("Could not persist session to Supabase dashboard_sessions (%s); saving to SQLite", e)
+
+        # Always persist to dedicated persistent SQLite database
         with self.lock, sqlite3.connect(self.session_db_path) as conn:
             conn.execute(
                 """
@@ -2878,6 +2908,27 @@ class DatabaseClient:
         if not session_id:
             return None
         session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+        # If Supabase is active, try to fetch from Supabase first
+        if self.has_supabase:
+            try:
+                res = self.client.table("dashboard_sessions").select("*").eq("session_hash", session_hash).limit(1).execute()
+                if res.data:
+                    data = dict(res.data[0])
+                    data["is_admin"] = bool(data.get("is_admin"))
+                    exp = data.get("expires_at")
+                    if exp:
+                        try:
+                            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                            if datetime.now(timezone.utc) > exp_dt:
+                                self.delete_session(session_id)
+                                return None
+                        except Exception:
+                            pass
+                    return data
+            except Exception as e:
+                logger.debug("Could not read session from Supabase dashboard_sessions (%s); falling back to SQLite", e)
+
         with self.lock, sqlite3.connect(self.session_db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM dashboard_sessions WHERE session_hash = ?", (session_hash,)).fetchone()
@@ -2900,8 +2951,19 @@ class DatabaseClient:
         if not session_id:
             return False
         session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+        deleted = False
+        if self.has_supabase:
+            try:
+                self.client.table("dashboard_sessions").delete().eq("session_hash", session_hash).execute()
+                deleted = True
+            except Exception as e:
+                logger.debug("Could not delete session from Supabase dashboard_sessions (%s)", e)
+
         with self.lock, sqlite3.connect(self.session_db_path) as conn:
             cursor = conn.execute("DELETE FROM dashboard_sessions WHERE session_hash = ?", (session_hash,))
-            return cursor.rowcount > 0
+            if cursor.rowcount > 0:
+                deleted = True
+        return deleted
 
 db = DatabaseClient()

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     ENGINE_API_KEY: str = Field(default="", description="Secret API key required for /api/v1/ protected endpoints")
     ENGINE_API_KEY_PREVIOUS: str = Field(default="", description="Previous key for graceful rotation")
     SESSION_DB_PATH: str = Field(
-        default="",
+        default="/var/data/operator_sessions.sqlite3",
         description="Path to SQLite database for persistent operator sessions on persistent disk (/var/data/operator_sessions.sqlite3)"
     )
 

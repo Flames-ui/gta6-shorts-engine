@@ -31,7 +31,7 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Create output and temporary directories for video rendering and processing
-RUN mkdir -p /app/output/clips /app/tmp && chmod -R 777 /app/output /app/tmp
+RUN mkdir -p /var/data /app/output/clips /app/tmp && chmod -R 777 /var/data /app/output /app/tmp
 
 EXPOSE 8000
 
