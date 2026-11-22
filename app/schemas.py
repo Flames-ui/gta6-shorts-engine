@@ -684,3 +684,39 @@ class EarningsSummaryResponse(BaseModel):
     total_withdrawable_earnings: float
     progress_percent: float
     days_remaining: int
+
+
+# =============================================================================
+# Milestone 2: Quality-First Clipping Engine & Operator Schemas
+# =============================================================================
+
+class OperatorOverviewResponse(BaseModel):
+    marketplace_session: Dict[str, Any]
+    campaigns: Dict[str, int]
+    production_pipeline: Dict[str, Any]
+    financial_metrics: Dict[str, Any]
+    operator_action_queue: Dict[str, Any]
+
+
+class CandidateQualityScoreRequest(BaseModel):
+    candidates: List[Dict[str, Any]]
+    campaign_id: Optional[str] = None
+    min_select: int = 3
+    max_select: int = 5
+
+
+class EditingPlanRequest(BaseModel):
+    campaign_id: str
+    candidate: Dict[str, Any]
+    source_footage_path: str = "/app/storage/footage.mp4"
+    platform: str = "tiktok"
+    source_authorized: bool = True
+    creator_attribution: str = "Gameplay footage used with creator authorization"
+
+
+class PublicationPackageRequest(BaseModel):
+    campaign_id: str
+    video_path: str = "/app/output/clip.mp4"
+    candidate_metadata: Dict[str, Any]
+    editing_plan: Dict[str, Any]
+    target_platform: str = "tiktok"

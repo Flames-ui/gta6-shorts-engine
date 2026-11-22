@@ -182,14 +182,58 @@ def _get_fernet_instance() -> Fernet:
     """Derive a deterministic Fernet cipher key from server configuration."""
     from ..config import settings
     raw_key = (settings.TOKEN_ENCRYPTION_KEY or "").strip()
+    env = (settings.ENVIRONMENT or "").lower()
     if not raw_key:
-        if settings.ENVIRONMENT.lower() == "production":
-            raise RuntimeError("TOKEN_ENCRYPTION_KEY must be configured in production; no fallback is permitted.")
-        raw_key = (settings.ENGINE_API_KEY or settings.SUPABASE_JWT_SECRET or "local-development-only-key").strip()
-    if len(raw_key) < 32 and settings.ENVIRONMENT.lower() == "production":
+        if env == "production":
+            raise RuntimeError("TOKEN_ENCRYPTION_KEY must be configured in production; no fallback encryption key is permitted.")
+        # Non-production fallback only for local testing
+        raw_key = (settings.ENGINE_API_KEY or settings.SUPABASE_JWT_SECRET or "").strip()
+        if not raw_key:
+            raw_key = "development-only-encryption-key-with-minimum-32-chars-entropy"
+    if len(raw_key) < 32 and env == "production":
         raise RuntimeError("TOKEN_ENCRYPTION_KEY must contain at least 32 characters in production.")
     derived = hashlib.sha256(raw_key.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(derived))
+
+
+def validate_encryption_key_at_startup() -> bool:
+    """
+    Validate the token encryption key at startup.
+    Ensures TOKEN_ENCRYPTION_KEY is non-empty, contains sufficient entropy (>= 32 chars in production),
+    and rejects insecure fallback keys in production.
+    """
+    from ..config import settings
+    raw_key = (settings.TOKEN_ENCRYPTION_KEY or "").strip()
+    env = (settings.ENVIRONMENT or "").lower()
+
+    if not raw_key:
+        if env == "production":
+            logger.error("FATAL: TOKEN_ENCRYPTION_KEY is missing in production environment.")
+            raise RuntimeError("TOKEN_ENCRYPTION_KEY must be configured in production; no insecure fallback key is permitted.")
+        logger.warning("TOKEN_ENCRYPTION_KEY not set in %s; using local dev derivation.", env)
+        return False
+
+    if len(raw_key) < 32:
+        if env == "production":
+            logger.error("FATAL: TOKEN_ENCRYPTION_KEY is shorter than 32 characters in production.")
+            raise RuntimeError("TOKEN_ENCRYPTION_KEY must be at least 32 characters in production.")
+        logger.warning("TOKEN_ENCRYPTION_KEY has fewer than 32 characters.")
+        return False
+
+    # Execute roundtrip test
+    try:
+        test_payload = "entropy_validation_check_string"
+        ciphertext = encrypt_secret(test_payload)
+        decrypted = decrypt_secret(ciphertext)
+        if decrypted != test_payload:
+            raise RuntimeError("Encryption roundtrip verification failed.")
+        logger.info("Session token encryption key validated successfully at startup.")
+        return True
+    except Exception as exc:
+        logger.error("Startup encryption validation failed: %s", exc)
+        if env == "production":
+            raise RuntimeError(f"Startup encryption validation failed: {exc}") from exc
+        return False
 
 
 def encrypt_secret(plaintext: Optional[str]) -> Optional[str]:

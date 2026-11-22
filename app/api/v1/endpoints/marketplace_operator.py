@@ -122,7 +122,39 @@ def discover_live_campaigns(
                 db.create_campaign(c)
                 saved.append(c)
             else:
-                saved.append(existing)
+                # Detect changes to rules, payouts, deadlines, and availability
+                changed_fields = []
+                for field in [
+                    "payout_amount", "cpm", "reward_model", "min_clip_duration_seconds",
+                    "max_clip_duration_seconds", "required_hashtags", "required_mentions",
+                    "required_captions", "status", "source_video_requirements"
+                ]:
+                    if c.get(field) != existing.get(field):
+                        changed_fields.append(field)
+
+                if changed_fields:
+                    logger.info("Rule/payout change detected for campaign %s: %s", c["id"], changed_fields)
+                    history = existing.get("history", [])
+                    history.append({
+                        "recorded_at": existing.get("updated_at"),
+                        "changed_fields": changed_fields,
+                        "previous_values": {f: existing.get(f) for f in changed_fields},
+                    })
+                    c["history"] = history
+                    c["created_at"] = existing.get("created_at")
+                    db.update_campaign(c["id"], c)
+
+                    operator_action_queue.push_action(
+                        action_type="campaign_rules_changed",
+                        title=f"Campaign Rules Changed: {c.get('name')}",
+                        message=f"Campaign {c['id']} updated on marketplace. Changed: {', '.join(changed_fields)}",
+                        campaign_id=c["id"],
+                        severity="warning",
+                        metadata={"changed_fields": changed_fields, "campaign_url": c.get("url")},
+                    )
+                    saved.append(c)
+                else:
+                    saved.append(existing)
         return saved
     except Exception as exc:
         logger.error("Live discovery failure: %s", exc)
@@ -162,6 +194,7 @@ def apply_to_campaign(
             campaign_id=campaign_id,
             campaign_url=url,
             operator_approved_terms=payload.operator_approved_terms,
+            campaign_data=campaign,
         )
         # Update campaign application status in DB
         db.update_campaign(campaign_id, {
@@ -206,3 +239,157 @@ def resolve_operator_action(
 def trigger_scheduled_refresh(auth: AuthContext = Depends(verify_api_key)):
     """Trigger an immediate campaign refresh cycle."""
     return campaign_scheduler.run_refresh_cycle()
+
+from ....schemas import CandidateQualityScoreRequest, EditingPlanRequest, PublicationPackageRequest
+from ....services.google_drive_assets import google_drive_asset_service
+from ....services.quality_candidate_scorer import quality_candidate_scorer
+from ....services.editing_planner import editing_planner
+from ....services.compliance_validator import compliance_validator
+from ....services.publication_package import publication_package_service
+
+@router.get("/campaigns/{campaign_id}/drive-assets", response_model=Dict[str, Any])
+def get_campaign_drive_assets(campaign_id: str, auth: AuthContext = Depends(verify_api_key)):
+    """
+    Inspect and list Google Drive assets associated with a campaign.
+    Detects Drive links from raw campaign rules if not yet downloaded.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+
+    raw_rules = campaign.get("raw_rules") or ""
+    detected_links = google_drive_asset_service.detect_drive_links(raw_rules)
+    registered_assets = google_drive_asset_service.list_campaign_assets(campaign_id)
+
+    return {
+        "campaign_id": campaign_id,
+        "campaign_name": campaign.get("name"),
+        "detected_links": detected_links,
+        "registered_assets": registered_assets,
+        "assets_count": len(registered_assets),
+        "has_assets": len(registered_assets) > 0,
+    }
+
+
+@router.post("/campaigns/{campaign_id}/drive-assets/register", response_model=Dict[str, Any])
+def register_campaign_drive_asset(
+    campaign_id: str,
+    file_name: str = Query(...),
+    drive_url: str = Query(""),
+    mime_type: str = Query("application/octet-stream"),
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Registers and records an authorized campaign asset in an isolated campaign folder.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+
+    dummy_payload = f"asset_content_{campaign_id}_{file_name}".encode("utf-8")
+    record = google_drive_asset_service.register_and_store_asset(
+        campaign_id=campaign_id,
+        file_name=file_name,
+        content_bytes=dummy_payload,
+        drive_url=drive_url,
+        mime_type=mime_type,
+    )
+    return record
+
+
+@router.post("/candidates/quality-score", response_model=Dict[str, Any])
+def score_quality_candidates(
+    payload: CandidateQualityScoreRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Scores candidates with the 100-point multi-factor model.
+    Ranks and selects strictly the top 3–5 candidates meeting >= 75 points.
+    """
+    campaign_ctx = None
+    if payload.campaign_id:
+        campaign_ctx = db.get_campaign(payload.campaign_id)
+
+    result = quality_candidate_scorer.rank_and_select_candidates(
+        candidates=payload.candidates,
+        campaign_context=campaign_ctx,
+        min_select=payload.min_select,
+        max_select=payload.max_select,
+    )
+    return result
+
+
+@router.post("/campaigns/{campaign_id}/editing-plan", response_model=Dict[str, Any])
+def create_editing_plan_for_campaign(
+    campaign_id: str,
+    payload: EditingPlanRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Generates a structured pre-render editing plan tailored to the campaign and platform.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+
+    assets = google_drive_asset_service.list_campaign_assets(campaign_id)
+
+    plan = editing_planner.create_editing_plan(
+        campaign=campaign,
+        candidate=payload.candidate,
+        source_footage_path=payload.source_footage_path,
+        platform=payload.platform,
+        source_authorized=payload.source_authorized,
+        creator_attribution=payload.creator_attribution,
+        campaign_assets=assets,
+    )
+    return plan
+
+
+@router.post("/clips/{clip_id}/publication-package", response_model=Dict[str, Any])
+def create_publication_package(
+    clip_id: str,
+    payload: PublicationPackageRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Generates a platform-specific publication package.
+    Executes Gate A (Creative Quality) and Gate B (Campaign Compliance) before staging.
+    """
+    campaign = db.get_campaign(payload.campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {payload.campaign_id} not found.")
+
+    # 1. Dual-gate validation
+    dual_gate = compliance_validator.validate_dual_gates(
+        clip_id=clip_id,
+        video_path=payload.video_path,
+        campaign=campaign,
+        candidate_metadata=payload.candidate_metadata,
+        editing_plan=payload.editing_plan,
+        target_platform=payload.target_platform,
+    )
+
+    if not dual_gate.get("overall_approved"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Clip rejected by compliance/quality gates. Both Gate A and Gate B must pass.",
+                "dual_gate_report": dual_gate,
+            }
+        )
+
+    # 2. Score candidate for package metadata
+    quality_res = quality_candidate_scorer.score_candidate(payload.candidate_metadata, campaign)
+
+    # 3. Assemble package
+    pkg = publication_package_service.generate_package(
+        clip_id=clip_id,
+        video_path=payload.video_path,
+        campaign=campaign,
+        editing_plan=payload.editing_plan,
+        dual_gate_result=dual_gate,
+        quality_score_result=quality_res,
+        target_platform=payload.target_platform,
+    )
+    return pkg

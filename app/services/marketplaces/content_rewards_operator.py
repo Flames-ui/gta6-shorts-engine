@@ -3,6 +3,7 @@ Content Rewards automated marketplace operator utilizing dedicated persistent br
 Adheres strictly to authorized operator workflows, human handling of CAPTCHA/2FA,
 gaming-only scope, zero fabrication, and encrypted session persistence at rest.
 """
+import hashlib
 import logging
 import re
 import time
@@ -35,18 +36,29 @@ class ContentRewardsOperator:
         """
         Inspect current browser session state, cookies, and login status.
         Does NOT leak raw session cookies or credentials.
+        Detects actual authenticated marketplace indicators; never claims login succeeded
+        merely because cookies exist. Detects expired sessions and alerts operator.
         """
         health = browser_manager.get_health_status()
         is_authenticated = False
         captcha_detected = False
+        session_expired = False
 
         if browser_manager.is_running:
             try:
                 page = browser_manager.get_page()
-                # Check for human verification challenges
                 captcha_detected = self._detect_captcha_or_challenge(page)
-                # Check if session indicates login
                 is_authenticated = self._check_auth_indicators(page)
+                # If persistent session exists or cookies exist but auth indicators fail, session is expired
+                if not is_authenticated and (health["has_persisted_session"] or health["active_cookies_count"] > 0):
+                    session_expired = True
+                    operator_action_queue.push_action(
+                        action_type="session_expired",
+                        title="Content Rewards Session Expired",
+                        message="Stored marketplace session has expired or authentication indicators are missing. Operator re-login required.",
+                        marketplace_id="content_rewards",
+                        severity="warning",
+                    )
             except Exception as exc:
                 logger.warning("Error checking live browser session status: %s", exc)
 
@@ -56,13 +68,15 @@ class ContentRewardsOperator:
             "browser_running": health["browser_running"],
             "has_persisted_session": health["has_persisted_session"],
             "active_cookies_count": health["active_cookies_count"],
+            "active_origins_count": health.get("active_origins_count", 0),
             "authenticated": is_authenticated,
+            "session_expired": session_expired,
             "captcha_or_2fa_detected": captcha_detected,
             "operator_action_required": not is_authenticated or captcha_detected,
             "recommended_action": (
-                "operator_login_required"
-                if not is_authenticated
-                else ("captcha_resolution_required" if captcha_detected else "none")
+                "operator_relogin_required" if session_expired
+                else ("operator_login_required" if not is_authenticated
+                else ("captcha_resolution_required" if captcha_detected else "none"))
             ),
         }
 
@@ -267,9 +281,15 @@ class ContentRewardsOperator:
             campaign_url=campaign_url,
         )
 
+        # Generate stable, deterministic ID based on campaign URL or external ID to prevent duplicates
+        url_normalized = campaign_url.strip().lower()
+        stable_hash = hashlib.sha256(url_normalized.encode("utf-8")).hexdigest()[:12]
+        stable_id = f"camp_ext_{stable_hash}"
+
         now_str = datetime.now(timezone.utc).isoformat()
         campaign_record = {
-            "id": f"camp_{uuid.uuid4().hex[:12]}",
+            "id": stable_id,
+            "external_id": stable_hash,
             "marketplace_id": "content_rewards",
             "marketplace_name": "Content Rewards",
             "name": title,
@@ -314,17 +334,30 @@ class ContentRewardsOperator:
         campaign_id: str,
         campaign_url: str,
         operator_approved_terms: bool = False,
+        campaign_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Submits application/joins campaign where permitted.
-        Strictly requires explicit operator confirmation before accepting terms.
-        Never auto-accepts financial or legal commitments.
+        Submits application or joins campaign where permitted.
+        Verification checklist before clicking Join or Apply:
+        1. Verify campaign exists and URL is valid.
+        2. Verify campaign eligibility and non-expired / non-exhausted status.
+        3. Strictly require explicit operator confirmation before accepting terms.
+        4. Inspect resulting page to confirm genuine marketplace success state.
+        5. Distinguish joined, applied, awaiting_brand_approval, rejected, and manual_action_required.
+        Never infer successful enrollment merely because a button was clicked.
         """
         if not operator_approved_terms:
             raise ValueError(
                 "Explicit operator approval is strictly required before submitting an application "
                 "or accepting campaign terms."
             )
+
+        if not campaign_url or not campaign_url.startswith("http"):
+            raise ValueError("Valid campaign URL is required for application submission.")
+
+        if campaign_data:
+            if campaign_data.get("status") in ("expired", "exhausted", "ineligible"):
+                raise ValueError(f"Cannot apply to campaign with status: {campaign_data.get('status')}")
 
         if not browser_manager.is_running:
             raise RuntimeError("Browser session not active; cannot submit campaign application.")
@@ -335,50 +368,113 @@ class ContentRewardsOperator:
         except Exception as exc:
             raise RuntimeError(f"Could not load campaign URL: {exc}")
 
+        # Check for expired/exhausted banner on page
+        page_text = page.inner_text("body").lower()
+        if any(term in page_text for term in ["campaign ended", "budget exhausted", "applications closed", "campaign expired"]):
+            return {
+                "campaign_id": campaign_id,
+                "application_status": "rejected",
+                "reason": "campaign_closed_or_exhausted",
+                "message": "Marketplace indicates the campaign has ended or allowance is exhausted.",
+            }
+
         # Locate Apply/Join button
-        button = page.query_selector("button:has-text('Join'), button:has-text('Apply'), a:has-text('Join Campaign')")
+        button = page.query_selector("button:has-text('Join'), button:has-text('Apply'), a:has-text('Join Campaign'), button:has-text('Participate')")
         if not button:
+            # Check if already enrolled
+            if "already enrolled" in page_text or "leave campaign" in page_text or "your submission" in page_text:
+                return {
+                    "campaign_id": campaign_id,
+                    "application_status": "joined",
+                    "already_enrolled": True,
+                    "message": "Marketplace indicates creator is already enrolled in this campaign.",
+                }
             return {
                 "campaign_id": campaign_id,
                 "application_status": "manual_action_required",
-                "message": "Join or Apply button not found automatically. Operator must apply directly in session.",
+                "message": "Join or Apply button not found. Operator must review and apply manually in session.",
             }
 
-        # Click apply button
+        # Click apply button safely
         button.click()
         time.sleep(2)
 
-        # Check if brand approval message appears
-        body_text = page.inner_text("body").lower()
-        if "pending approval" in body_text or "under review" in body_text or "awaiting approval" in body_text:
+        # Inspect resulting page for genuine marketplace success state
+        resulting_text = page.inner_text("body").lower()
+
+        if any(term in resulting_text for term in ["application submitted", "pending approval", "under review", "awaiting brand approval"]):
             app_status = "awaiting_brand_approval"
-        else:
+            success_verified = True
+        elif any(term in resulting_text for term in ["you are enrolled", "joined successfully", "ready to submit", "campaign joined", "upload video"]):
             app_status = "joined"
+            success_verified = True
+        elif any(term in resulting_text for term in ["rejected", "not eligible", "requirements not met"]):
+            app_status = "rejected"
+            success_verified = False
+        else:
+            # Fallback if no clear confirmation message appeared
+            app_status = "manual_action_required"
+            success_verified = False
+
+        screenshot_path = browser_manager.capture_diagnostic_screenshot(f"application_{campaign_id}")
 
         return {
             "campaign_id": campaign_id,
             "application_status": app_status,
+            "success_verified": success_verified,
             "applied_at": datetime.now(timezone.utc).isoformat(),
             "operator_approved_terms": True,
-            "message": f"Application submitted with status: '{app_status}'.",
+            "diagnostic_screenshot": screenshot_path,
+            "message": f"Application processed with verified marketplace status: '{app_status}'.",
         }
 
     def _check_auth_indicators(self, page) -> bool:
-        """Heuristics to confirm whether an active session is authenticated."""
+        """
+        Detect actual authenticated marketplace indicators.
+        Never claim login succeeded merely because cookies exist.
+        Requires presence of positive authenticated elements (account, logout, profile, avatar)
+        and absence of unauthenticated login buttons.
+        """
         try:
-            # Check cookies in context
-            context_cookies = page.context.cookies()
-            auth_cookie_names = ["session", "auth", "token", "jwt", "cr_auth", "user_session", "logged_in"]
-            has_auth_cookie = any(
-                any(c_name in c.get("name", "").lower() for c_name in auth_cookie_names)
-                for c in context_cookies
+            # Check for visible login/sign-in buttons -> definitely unauthenticated
+            unauth_btn = page.query_selector(
+                "a[href*='/login'], a[href*='/signin'], button:has-text('Sign In'), button:has-text('Log In')"
             )
+            if unauth_btn and unauth_btn.is_visible():
+                return False
 
-            # Check DOM elements
-            has_user_profile = bool(
-                page.query_selector("a[href*='/logout'], a[href*='/account'], a[href*='/profile'], [data-testid='user-avatar']")
-            )
-            return has_auth_cookie or has_user_profile
+            curr_url = (page.url or "").lower()
+            if "/login" in curr_url or "/signup" in curr_url or "/auth" in curr_url:
+                return False
+
+            # Positive indicators of authentic login
+            auth_selectors = [
+                "a[href*='/logout']",
+                "a[href*='/signout']",
+                "a[href*='/account']",
+                "a[href*='/profile']",
+                "[data-testid='user-avatar']",
+                "[data-testid='user-profile']",
+                ".user-logged-in",
+                "button:has-text('Sign Out')",
+                "button:has-text('Log Out')",
+            ]
+            has_positive_elem = any(bool(page.query_selector(sel)) for sel in auth_selectors)
+            if has_positive_elem:
+                return True
+
+            # If user is on an authenticated page like dashboard or earnings and cookies exist
+            if any(path in curr_url for path in ["/dashboard", "/account", "/my-campaigns", "/earnings"]):
+                context_cookies = page.context.cookies()
+                auth_cookie_names = ["session", "auth", "token", "jwt", "cr_auth", "user_session"]
+                has_cookie = any(
+                    any(c_name in c.get("name", "").lower() for c_name in auth_cookie_names)
+                    for c in context_cookies
+                )
+                if has_cookie:
+                    return True
+
+            return False
         except Exception:
             return False
 

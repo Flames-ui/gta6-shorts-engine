@@ -27,11 +27,20 @@ class BrowserManager:
     """
 
     def __init__(self):
-        self.profile_dir = Path(settings.BROWSER_PROFILE_DIR)
+        # Support durable storage under /var/data if mounted on Render
+        env_profile = os.environ.get("BROWSER_PROFILE_DIR")
+        if env_profile:
+            self.profile_dir = Path(env_profile)
+        elif os.path.exists("/var/data") and os.access("/var/data", os.W_OK):
+            self.profile_dir = Path("/var/data/browser_profile")
+        else:
+            self.profile_dir = Path(settings.BROWSER_PROFILE_DIR)
+
         self.session_file = self.profile_dir / "session.enc"
         self.diagnostics_dir = Path("/tmp/browser_diagnostics")
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        self._restored_storage_summary: Dict[str, Any] = {}
 
         self._playwright = None
         self._browser = None
@@ -75,14 +84,19 @@ class BrowserManager:
                 args=chromium_args,
             )
 
-            # Create context with standard operator viewport
-            self._context = self._browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            )
+            # Check for decrypted persistent storage state (cookies + origins)
+            storage_state_arg = self.get_decrypted_storage_state()
+            context_kwargs: Dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 800},
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            }
+            if storage_state_arg:
+                context_kwargs["storage_state"] = storage_state_arg
+
+            self._context = self._browser.new_context(**context_kwargs)
             self._context.set_default_timeout(settings.BROWSER_NAVIGATION_TIMEOUT_MS)
 
-            # Restore encrypted session if present
+            # Record session restoration summary
             self.restore_encrypted_session()
 
             self._page = self._context.new_page()
@@ -177,31 +191,63 @@ class BrowserManager:
             logger.error("Failed to save encrypted browser session: %s", exc)
             return False
 
+    def get_decrypted_storage_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Decrypts and returns full Playwright storage_state (cookies + origins/localStorage).
+        Returns None if session file is missing, empty, or invalid.
+        """
+        if not self.session_file.exists():
+            return None
+        try:
+            with open(self.session_file, "r", encoding="utf-8") as f:
+                encrypted = f.read().strip()
+            if not encrypted:
+                return None
+            decrypted = decrypt_secret(encrypted)
+            if not decrypted:
+                return None
+            state = json.loads(decrypted)
+            if isinstance(state, dict):
+                return state
+            return None
+        except Exception as exc:
+            logger.warning("Error decrypting storage state: %s", exc)
+            return None
+
     def restore_encrypted_session(self) -> bool:
         """
-        Decrypts persisted session file and restores cookies into context.
+        Decrypts persisted session file and restores all supported browser storage state,
+        including cookies and local-storage origins.
+        Do not restore cookies alone when the marketplace also depends on local storage.
         Verifies session integrity without leaking plaintext to disk.
         """
         if not self.session_file.exists() or not self._context:
             return False
 
         try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
-                encrypted = f.read().strip()
-            if not encrypted:
+            state = self.get_decrypted_storage_state()
+            if not state:
                 return False
 
-            decrypted = decrypt_secret(encrypted)
-            if not decrypted:
-                return False
-
-            state = json.loads(decrypted)
             cookies = state.get("cookies", [])
+            origins = state.get("origins", [])
+            restored = False
+
             if cookies:
                 self._context.add_cookies(cookies)
                 logger.info("Restored %d cookies from encrypted session.", len(cookies))
-                return True
-            return False
+                restored = True
+
+            if origins:
+                logger.info("Restored %d local-storage origins from encrypted session.", len(origins))
+                restored = True
+
+            self._restored_storage_summary = {
+                "cookie_count": len(cookies),
+                "origin_count": len(origins),
+                "restored_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return restored
         except Exception as exc:
             logger.warning("Could not restore encrypted session (may be invalid or expired): %s", exc)
             return False
@@ -261,10 +307,19 @@ class BrowserManager:
             except Exception:
                 pass
 
+        origins_count = 0
+        decrypted_state = self.get_decrypted_storage_state()
+        if decrypted_state:
+            origins_count = len(decrypted_state.get("origins", []))
+
         return {
             "browser_running": self.is_running,
             "has_persisted_session": has_session_file,
             "active_cookies_count": cookies_count,
+            "active_origins_count": origins_count,
+            "restored_storage_summary": self._restored_storage_summary,
+            "profile_dir": str(self.profile_dir),
+            "durable_storage_verified": not str(self.profile_dir).startswith("/tmp") or (os.path.exists("/var/data") and os.access("/var/data", os.W_OK)),
             "crash_count": self._crash_count,
             "memory_limit_mb": settings.BROWSER_MAX_MEMORY_MB,
             "navigation_timeout_ms": settings.BROWSER_NAVIGATION_TIMEOUT_MS,

@@ -534,3 +534,68 @@ Milestone 2 extends the clipping engine with a dedicated, persistent browser ope
 | `GET` | `/api/v1/marketplace/actions` | List active operator intervention alerts and pending actions |
 | `POST` | `/api/v1/marketplace/actions/{id}/resolve` | Mark an operator action resolved |
 | `POST` | `/api/v1/marketplace/scheduler/refresh` | Trigger immediate background campaign refresh cycle |
+
+---
+
+## Milestone 2 Complete: Quality-First Clipping Engine & Operator System
+
+### 1. Durable Persistent Session Storage & Key Validation
+- **Storage State Restoration**: Restores both cookies and local-storage origins via Playwright `storage_state`.
+- **Durable Disk Mount**: Configured for Render persistent disk under `/var/data` (`/var/data/browser_profile`), eliminating session loss across instance restarts.
+- **Startup Key Validation**: Enforces `TOKEN_ENCRYPTION_KEY` at application startup (minimum 32 characters in production) with zero insecure fallback key tolerance in production.
+- **Authentic Login Detection**: Detects genuine authenticated marketplace indicators (`[data-testid='user-avatar']`, logout/account links) and rejects sessions where login prompts remain visible. Flags expired sessions and alerts the operator.
+
+### 2. Google Drive Campaign Assets (`app/services/google_drive_assets.py`)
+- **Link Detection & Classification**: Detects folder and file links from campaign rules; classifies assets into `video`, `logo`, `image`, `audio`, `font`, and `instruction_doc`.
+- **Campaign Isolation**: Each campaign receives an isolated directory (`/var/data/campaign_assets/{campaign_id}/`). Assets are never mixed across campaigns.
+- **Provenance & Integrity**: Computes SHA-256 checksums for every downloaded asset.
+- **Access Restrictions**: Detects HTTP 403 / restricted Drive links and automatically queues an action (`google_drive_access_required`) in the operator queue.
+
+### 3. Quality-First 100-Point Candidate Moment Scoring (`app/services/quality_candidate_scorer.py`)
+- **Scoring Model**:
+  - Hook strength: 20 pts
+  - Entertainment value: 20 pts
+  - Story clarity: 15 pts
+  - Reaction / payoff: 15 pts
+  - Visual and audio quality: 10 pts
+  - Caption potential: 10 pts
+  - Replay potential: 5 pts
+  - Campaign fit: 5 pts
+  - **Total**: 100 points
+- **Selection Thresholds**:
+  - `85–100`: Premium candidate
+  - `75–84`: Strong candidate
+  - `65–74`: Hold for reconsideration
+  - `<65`: Rejected
+- **Strict Selectivity**: Target 3–5 clips per day. Selects strictly candidates scoring $\ge 75.0$. If fewer pass, produces fewer. Never lowers quality thresholds to fill a quota.
+
+### 4. Campaign-Specific Pre-Render Editing Planner (`app/services/editing_planner.py`)
+- **Structured Pre-Render Plan**: Specifies opening hooks, scene sequences, cuts, purposeful zooms (not constant shake), word-by-word burst captions, logo overlays, sound effects, audio licensing, and exact verbatim publication metadata.
+- **Differentiated Decisions**: Distinct campaigns produce distinctly different editing plans, durations, visual treatments, and platform formatting.
+
+### 5. Dual-Gate Quality & Compliance Approval (`app/services/compliance_validator.py`)
+- **Gate A (Creative Quality)**: Evaluates hook strength, story clarity, pacing, caption accuracy, audio/visual quality, ending, replay potential, and duplication risk.
+- **Gate B (Campaign Compliance)**: Evaluates source authorization, platform eligibility, duration, aspect ratio (9:16), resolution ($\ge 720\times 1280$), required hashtags, mentions, captions, and prohibited terms.
+- **Dual Approval Required**: A clip must pass BOTH Gate A and Gate B before staging for production.
+
+### 6. Platform-Specific Publication Packages (`app/services/publication_package.py`)
+- **Independent Staging**: Produces tailored publication packages for TikTok and YouTube Shorts (`#Shorts` tag, character limits, audio licensing).
+- **Safety Gate**: Publishing automation remains disabled (`PUBLISHING_AUTOMATION_ENABLED=false`) until explicitly authorized by operator.
+
+### 7. Earnings & Performance Tracking (`app/services/earnings_tracker.py`)
+- **Strict Accounting**: Separate tracking of clips generated, QC passed, compliance passed, published, submitted, approved, rejected, eligible views, pending rewards, approved earnings, and withdrawable balance.
+- **Target Progression**: The $500 30-day target is calculated strictly against confirmed approved rewards. Enforces `withdrawable_earnings <= approved_rewards`.
+
+### 8. Operator Dashboard Overview (`GET /api/v1/dashboard/operator-overview`)
+- Aggregates live browser session health, campaign state breakdown (discovered, eligible, approved, awaiting review, awaiting brand approval, exhausted/expired), production pipeline counters (analyzed, rejected, selected, rendered, QC passed, compliance passed), financial metrics, and operator action queue.
+
+### New API Endpoints
+
+| Method | Endpoint | Description |
+|:---|:---|:---|
+| `GET` | `/api/v1/dashboard/operator-overview` | Real-time Milestone 2 overview with session state, campaigns, pipeline counters, and $500 target |
+| `GET` | `/api/v1/marketplace/campaigns/{id}/drive-assets` | List Drive assets and detected links for a campaign |
+| `POST` | `/api/v1/marketplace/campaigns/{id}/drive-assets/register` | Register an authorized campaign asset in isolated workspace |
+| `POST` | `/api/v1/marketplace/candidates/quality-score` | Score candidates using 100-point model and rank top 3-5 |
+| `POST` | `/api/v1/marketplace/campaigns/{id}/editing-plan` | Generate campaign-specific structured editing plan |
+| `POST` | `/api/v1/marketplace/clips/{id}/publication-package` | Assemble platform-specific publication package with dual-gate check |

@@ -9,6 +9,10 @@ services:
     dockerContext: .
     plan: standard
     healthCheckPath: /health
+    disk:
+      name: gta6-shorts-data
+      mountPath: /var/data
+      sizeGB: 10
     envVars:
       - key: ENVIRONMENT
         value: production
@@ -22,6 +26,10 @@ services:
         value: 'https://lovable.dev,https://lovable.app'
       - key: PUBLISHING_AUTOMATION_ENABLED
         value: 'false'
+      - key: BROWSER_PROFILE_DIR
+        value: /var/data/browser_profile
+      - key: CAMPAIGN_ASSETS_DIR
+        value: /var/data/campaign_assets
 
       # Authentication & Encryption Keys (Server-controlled)
       - key: ENGINE_API_KEY

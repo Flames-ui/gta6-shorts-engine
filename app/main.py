@@ -19,9 +19,18 @@ logging.basicConfig(
 logger = logging.getLogger("gta6_shorts.main")
 
 
+from .services.security import validate_encryption_key_at_startup
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing %s v%s in %s mode", settings.APP_NAME, settings.APP_VERSION, settings.ENVIRONMENT)
+    # Validate session encryption key at startup
+    try:
+        validate_encryption_key_at_startup()
+    except Exception as exc:
+        logger.error("Startup encryption validation error: %s", exc)
+        if settings.ENVIRONMENT.lower() == "production":
+            raise
     yield
     logger.info("Shutting down %s", settings.APP_NAME)
 

@@ -70,6 +70,10 @@ class OperatorActionQueue:
             logger.info("Queued operator action: [%s] %s (%s)", severity.upper(), title, action_id)
             return record
 
+    def list_pending_actions(self) -> List[Dict[str, Any]]:
+        """Convenience alias to list pending actions."""
+        return self.list_actions(status="pending")
+
     def list_actions(
         self,
         status: Optional[str] = "pending",
@@ -105,6 +109,11 @@ class OperatorActionQueue:
                 item["metadata"]["resolution_notes"] = notes
             logger.info("Resolved operator action %s by %s", action_id, resolved_by)
             return item
+
+    def clear_all(self):
+        """Clears all queued actions (useful for testing/resets)."""
+        with self._lock:
+            self._actions.clear()
 
     def clear_actions_by_type(self, action_type: str, marketplace_id: Optional[str] = None):
         """Batch-resolve actions of a specific type (e.g. login_required after login)."""

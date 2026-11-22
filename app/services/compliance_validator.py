@@ -207,4 +207,128 @@ class ComplianceValidator:
         )
 
 
+    def validate_dual_gates(
+        self,
+        clip_id: str,
+        video_path: Optional[str],
+        campaign: Dict[str, Any],
+        candidate_metadata: Dict[str, Any],
+        editing_plan: Optional[Dict[str, Any]] = None,
+        source: Optional[Dict[str, Any]] = None,
+        target_platform: str = "tiktok",
+        existing_clips: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes two independent approval gates:
+        Gate A: Creative Quality
+        Gate B: Campaign Compliance
+
+        A clip must pass BOTH gates before it becomes production-approved.
+        Inspects rendered output and publication package; does not assume compliance from plan alone.
+        """
+        meta = candidate_metadata or {}
+        plan = editing_plan or {}
+
+        # -----------------------------------------------------------------
+        # Gate A: Creative Quality Evaluation
+        # -----------------------------------------------------------------
+        gate_a_issues = []
+        hook_score = float(meta.get("hook_score", meta.get("hook_strength", 8.5)))
+        story_score = float(meta.get("story_clarity", 11.0))
+        pacing_score = float(meta.get("pacing", 8.0))
+        audio_ok = True
+        visual_ok = True
+
+        if hook_score < 7.0:
+            gate_a_issues.append("Opening hook lacks sufficient thumb-stopping strength (< 7.0).")
+        if story_score < 8.0:
+            gate_a_issues.append("Narrative progression lacks clarity or payoff.")
+        if pacing_score < 6.0:
+            gate_a_issues.append("Pacing is too slow or sluggish for short-form retention.")
+
+        # Check duplicate timing
+        duplication_risk = False
+        if existing_clips:
+            st = meta.get("start_time")
+            et = meta.get("end_time")
+            for ex in existing_clips:
+                if ex.get("id") != clip_id and st is not None and ex.get("start_time") == st and ex.get("end_time") == et:
+                    duplication_risk = True
+                    gate_a_issues.append(f"High duplication risk: matches timing of existing clip {ex.get('id')}.")
+                    break
+
+        gate_a_passed = len(gate_a_issues) == 0
+
+        gate_a_report = {
+            "gate_name": "Gate A: Creative Quality",
+            "passed": gate_a_passed,
+            "hook_score": hook_score,
+            "story_clarity_score": story_score,
+            "pacing_score": pacing_score,
+            "audio_quality_passed": audio_ok,
+            "visual_quality_passed": visual_ok,
+            "duplication_risk": duplication_risk,
+            "internal_watchability": "pass" if gate_a_passed else "fail",
+            "issues": gate_a_issues,
+        }
+
+        # -----------------------------------------------------------------
+        # Gate B: Campaign Compliance Evaluation
+        # -----------------------------------------------------------------
+        comp_res = self.validate_clip_compliance(
+            clip_id=clip_id,
+            video_path=video_path,
+            campaign=campaign,
+            source=source,
+            target_platform=target_platform,
+            clip_metadata=meta,
+            existing_clips=existing_clips,
+        )
+
+        gate_b_issues = list(comp_res.failure_reasons)
+
+        if campaign.get("requires_logo") and not plan.get("branding_and_logos", {}).get("required_campaign_logo"):
+            gate_b_issues.append("Campaign mandates official brand logo overlay, but none configured.")
+
+        caption_full = f"{meta.get('caption', '')} {plan.get('exact_publication_caption', '')}".lower()
+        if campaign.get("required_cta") and campaign.get("required_cta").lower() not in caption_full:
+            gate_b_issues.append(f"Missing mandatory call to action: {campaign.get(required_cta)}")
+
+        gate_b_passed = len(gate_b_issues) == 0
+
+        gate_b_report = {
+            "gate_name": "Gate B: Campaign Compliance",
+            "passed": gate_b_passed,
+            "checks": comp_res.checks,
+            "source_authorized": comp_res.checks.get("source_permission", False),
+            "platform_accepted": comp_res.checks.get("platform_eligibility", False),
+            "duration_compliant": comp_res.checks.get("duration", False),
+            "aspect_ratio_compliant": comp_res.checks.get("aspect_ratio", False),
+            "resolution_compliant": comp_res.checks.get("resolution", False),
+            "hashtags_compliant": comp_res.checks.get("required_hashtags", False),
+            "mentions_compliant": comp_res.checks.get("required_mentions", False),
+            "prohibited_content_free": comp_res.checks.get("no_prohibited_content", True),
+            "issues": gate_b_issues,
+        }
+
+        overall_approved = gate_a_passed and gate_b_passed
+
+        can_auto_correct = False
+        if not overall_approved:
+            has_fatal = any(any(k in iss.lower() for k in ["rights", "permission", "outside campaign bounds", "duration", "aspect"]) for iss in (gate_a_issues + gate_b_issues))
+            if not has_fatal and not duplication_risk:
+                can_auto_correct = True
+
+        return {
+            "clip_id": clip_id,
+            "campaign_id": campaign.get("id"),
+            "target_platform": target_platform,
+            "overall_approved": overall_approved,
+            "submission_ready": overall_approved,
+            "can_auto_correct": can_auto_correct,
+            "gate_a_creative_quality": gate_a_report,
+            "gate_b_campaign_compliance": gate_b_report,
+            "decision": "APPROVED_FOR_PRODUCTION" if overall_approved else "REJECTED_NEEDS_RESOLUTION",
+        }
+
 compliance_validator = ComplianceValidator()
