@@ -5,12 +5,16 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000
 
-# Install system dependencies: FFmpeg, OpenGL / OpenCV runtime libs, git, curl
+# Install system dependencies: FFmpeg, ffprobe, subtitle/render fonts, OpenCV & GL runtimes, curl, git
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    fonts-dejavu-core \
+    fonts-freefont-ttf \
+    fontconfig \
     libsm6 \
     libxext6 \
     libgl1 \
+    libglib2.0-0 \
     git \
     curl \
     ca-certificates \
@@ -26,8 +30,8 @@ RUN pip install --upgrade pip && \
 # Copy application source code
 COPY . .
 
-# Create output directory for temporary rendering
-RUN mkdir -p output/clips && chmod -R 777 output
+# Create output and temporary directories for video rendering and processing
+RUN mkdir -p /app/output/clips /app/tmp && chmod -R 777 /app/output /app/tmp
 
 EXPOSE 8000
 

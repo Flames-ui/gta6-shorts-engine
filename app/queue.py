@@ -173,17 +173,54 @@ class JobQueue:
     def recover_orphaned_jobs(self):
         """Identify jobs left in 'processing' state when worker restarts, safely marking or re-queuing."""
         try:
-            from .supabase_client import db
-            # In SQLite / Supabase query processing jobs
-            if db.has_supabase:
-                res = db.client.table("processing_jobs").select("*").eq("status", "processing").execute()
-                orphaned = res.data or []
-            else:
-                with db.lock, db._get_sqlite_conn() if hasattr(db, "_get_sqlite_conn") else None:
-                    orphaned = []
-            logger.info("Checked for orphaned jobs on startup: found %d", len(orphaned))
+            from .services.supabase_client import db
+            from .services.video_processor import process_video_job
+
+            orphaned, _ = db.list_jobs(limit=100, status="processing")
+            logger.info("Checked for orphaned jobs on worker startup: found %d in 'processing' status", len(orphaned))
+
+            for job in orphaned:
+                job_id = job.get("id")
+                if not job_id:
+                    continue
+                current_retries = int(job.get("retry_count") or 0)
+                self.release_job_lock(job_id)
+
+                if current_retries >= 3:
+                    logger.warning(
+                        "Job %s exceeded retry limit (retries=%d) on worker restart; marking failed",
+                        job_id,
+                        current_retries,
+                    )
+                    db.update_job_progress(
+                        job_id,
+                        status="failed",
+                        stage="failed",
+                        error="Worker restarted while processing; maximum retry limit reached.",
+                    )
+                    db.add_log(job_id, "failed", "Worker restarted while processing; maximum retry limit reached.")
+                else:
+                    new_retries = current_retries + 1
+                    logger.info(
+                        "Recovering orphaned job %s (attempt %d/3); re-queuing for execution",
+                        job_id,
+                        new_retries,
+                    )
+                    db.update_job_progress(
+                        job_id,
+                        status="queued",
+                        stage="pending",
+                        progress=0,
+                        retry_count=new_retries,
+                    )
+                    db.add_log(
+                        job_id,
+                        "recovered",
+                        f"Worker restarted while processing; job re-queued for processing (attempt {new_retries}/3).",
+                    )
+                    self.enqueue_job(process_video_job, job_id)
         except Exception as exc:
-            logger.debug("Orphaned jobs check notice: %s", exc)
+            logger.error("Error during orphaned jobs recovery: %s", exc)
 
 
 job_queue = JobQueue()

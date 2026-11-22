@@ -205,21 +205,93 @@ Key tables provisioned with Row Level Security:
 
 ## 10. Render Cloud Deployment
 
-The repository includes a ready-to-deploy `render.yaml` Blueprint configuring three linked services:
+The repository includes a verified, production-ready `render.yaml` Blueprint configuring three linked Docker and Key-Value services:
 
-1. **`gta6-shorts-engine`** (Web Service):
-   - Fast lightweight FastAPI application.
-   - Handles API traffic, validation, Supabase synchronization, and queue dispatch.
-   - Health check path: `/health`.
+### 1. Service Topology
+- **`gta6-shorts-engine` (Web Service)**:
+  - **Runtime**: Production Docker container (`Dockerfile`).
+  - **Instance Plan**: `standard` (or higher) with HTTP port 8000.
+  - **Health Check**: Configured on `/health` (HTTP 200 with dependency statuses).
+  - **Readiness Probes**: `/health/ready` (responds 503 if Supabase or Redis are unavailable in production).
+  - **Liveness Probes**: `/health/live` (responds 200 if server process is running).
+  - **Responsibilities**: REST API endpoints, user authentication, tenant isolation, Supabase data persistence, signed media URL generation, and distributed task dispatching.
 
-2. **`gta6-shorts-worker`** (Background Worker):
-   - High-CPU/RAM container with pre-installed FFmpeg and Whisper models.
-   - Dequeues jobs from Redis and executes AI highlighting, audio extraction, vertical cropping, and video validation.
+- **`gta6-shorts-worker` (Background Worker)**:
+  - **Runtime**: Production Docker container (`Dockerfile`).
+  - **Instance Plan**: `standard` (or higher) to handle intensive FFmpeg rendering, Whisper audio transcription, OpenCV analysis, and video transcoding. **Never run on an undersized starter plan.**
+  - **Startup Command**: `python -m app.worker`.
+  - **Responsibilities**: Dequeues jobs from Redis, executes audio/video processing, runs Gemini/OpenAI highlight analysis, renders ASS subtitles, generates 9:16 vertical clips, uploads to private Supabase storage, and safely recovers orphaned `processing` jobs upon restart.
 
-3. **`gta6-shorts-redis`** (Private Redis):
-   - High-performance job queue for Redis RQ.
+- **`gta6-shorts-redis` (Private Redis / Key-Value)**:
+  - **Type**: `keyvalue` (Private Redis instance).
+  - **Access Control**: `ipAllowList: []` — completely private and unreachable from the public internet. Accessible only by internal Render services.
+  - **Connection**: Web and worker services automatically connect to the same private Redis using Render's `property: connectionString`.
 
-To deploy, connect your GitHub repository to [Render](https://render.com) and deploy the Blueprint directly via `render.yaml`.
+---
+
+### 2. Complete Environment Variable Configuration Matrix
+
+The table below details every environment variable configured in `render.yaml`, distinguishing values that Render or Blueprint manages automatically from secrets that **you must supply**:
+
+| Environment Variable | Target Services | Category / Origin | Description |
+| :--- | :--- | :--- | :--- |
+| `ENVIRONMENT` | Web, Worker | Built-in | Set to `production` for strict fail-closed security. |
+| `FAIL_CLOSED_IN_PRODUCTION` | Web, Worker | Built-in | Set to `true` to reject unverified JWTs and enforce Supabase/Redis. |
+| `LOG_LEVEL` | Web, Worker | Built-in | Logging verbosity (`INFO`). |
+| `PORT` | Web | Built-in | Default web port (`8000`). |
+| `CORS_ORIGINS` | Web | Built-in | Allowed frontend origins (`https://lovable.dev,https://lovable.app`). |
+| `PUBLISHING_AUTOMATION_ENABLED` | Web, Worker | Safety Default | Default `false` during deployment testing to avoid accidental public posts. Set `true` only when ready to enable 24/7 autonomous publishing. |
+| `ENGINE_API_KEY` | Web (Generated) -> Worker (Sync) | **Render Auto-Generated** | 32-character cryptographically random server secret. Automatically shared with the worker. |
+| `ENGINE_API_KEY_PREVIOUS` | Web | Optional Secret | Kept for zero-downtime key rotation. |
+| `TOKEN_ENCRYPTION_KEY` | Web (Generated) -> Worker (Sync) | **Render Auto-Generated** | Encryption key used for AES token encryption at rest. Automatically shared with the worker. |
+| `ADMIN_USER_IDS` | Web | **User-Supplied** (Optional) | Comma-separated list of Supabase `user_id`s granted administrator privileges. |
+| `ADMIN_EMAILS` | Web | **User-Supplied** (Optional) | Comma-separated list of admin email addresses. |
+| `SUPABASE_URL` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Your Supabase project URL (`https://<project-ref>.supabase.co`). |
+| `SUPABASE_SERVICE_ROLE_KEY` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Your secret `service_role` key. Kept exclusively on the server, never exposed. |
+| `SUPABASE_JWT_SECRET` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Supabase Auth JWT secret used to cryptographically verify user tokens. |
+| `SUPABASE_STORAGE_BUCKET` | Web, Worker | Built-in | Name of private storage bucket (`shorts`). |
+| `REDIS_URL` | Web, Worker | **Render Key-Value (Sync)** | Private Redis connection string wired directly from `gta6-shorts-redis`. |
+| `QUEUE_NAME` | Web, Worker | Built-in | RQ queue name (`viral-shorts`). |
+| `MAX_CONCURRENT_JOBS` | Worker | Built-in | Worker concurrency ceiling (`2`). |
+| `JOB_TIMEOUT_SECONDS` | Worker | Built-in | Maximum execution timeout per video job (`1800` seconds / 30 min). |
+| `LLM_PROVIDER` | Web, Worker | Built-in | AI highlight provider (`gemini`). |
+| `GEMINI_API_KEY` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Google Gemini API key for intelligent video highlight and caption detection. |
+| `GEMINI_MODEL` | Web, Worker | Built-in | Model version (`gemini-2.5-flash`). |
+| `OPENAI_API_KEY` | Web -> Worker (Sync) | **User-Supplied** (Optional) | OpenAI API key for secondary fallback. |
+| `OPENAI_MODEL` | Web, Worker | Built-in | OpenAI model (`gpt-4o-mini`). |
+| `BUFFER_CLIENT_ID` | Web -> Worker (Sync) | **User-Supplied** (For Buffer) | Buffer OAuth application Client ID. |
+| `BUFFER_CLIENT_SECRET` | Web -> Worker (Sync) | **User-Supplied** (For Buffer) | Buffer OAuth application Client Secret. |
+| `BUFFER_REDIRECT_URI` | Web -> Worker (Sync) | **User-Supplied** (For Buffer) | `https://<YOUR_RENDER_URL>/api/v1/publishing/buffer/callback`. |
+| `YOUTUBE_CLIENT_ID` | Web -> Worker (Sync) | **User-Supplied** (For YouTube) | Google Cloud OAuth Client ID for direct YouTube Shorts publishing. |
+| `YOUTUBE_CLIENT_SECRET` | Web -> Worker (Sync) | **User-Supplied** (For YouTube) | Google Cloud OAuth Client Secret. |
+| `YOUTUBE_REDIRECT_URI` | Web -> Worker (Sync) | **User-Supplied** (For YouTube) | Google OAuth callback URI. |
+| `LOCAL_WHISPER_MODEL` | Worker | Built-in | Local Whisper model size (`base`). |
+| `LOCAL_WHISPER_DEVICE` | Worker | Built-in | Whisper compute device (`cpu`). |
+| `OUTPUT_DIR` / `LOCAL_OUTPUT_DIR` | Web, Worker | Built-in | Local output path (`/app/output`). |
+| `TEMP_DIR` | Web, Worker | Built-in | Scratch directory (`/app/tmp`). |
+| `DAILY_TARGET_MIN` / `MAX` | Worker | Built-in | Autonomous daily clip generation quota (`15` to `20`). |
+
+---
+
+### 3. Deploying the Blueprint on Render
+1. Navigate to the **Render Dashboard** > **Blueprints** > **New Blueprint Instance**.
+2. Connect the repository `Flames-ui/gta6-shorts-engine` and select the `main` branch.
+3. Render will parse `render.yaml` and prompt you to input the **User-Supplied Mandatory Values**:
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `SUPABASE_JWT_SECRET`
+   - `GEMINI_API_KEY`
+   - Buffer / YouTube credentials (if social publishing is being activated)
+4. Click **Apply**. Render will:
+   - Provision the private `gta6-shorts-redis` Key-Value database.
+   - Build and launch the `gta6-shorts-engine` Docker image.
+   - Build and launch the `gta6-shorts-worker` Docker container using `python -m app.worker`.
+5. Once deployment completes, check the health endpoints:
+   ```bash
+   curl -s https://<YOUR_RENDER_URL>/health | jq .
+   curl -s https://<YOUR_RENDER_URL>/health/ready | jq .
+   curl -s https://<YOUR_RENDER_URL>/health/live | jq .
+   ```
 
 ---
 

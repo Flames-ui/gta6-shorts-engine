@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     ENGINE_API_KEY: str = Field(default="", description="Secret API key required for /api/v1/ protected endpoints")
     ENGINE_API_KEY_PREVIOUS: str = Field(default="", description="Previous key for graceful rotation")
     FAIL_CLOSED_IN_PRODUCTION: bool = Field(default=True, description="Enforce strict authentication in production")
+    PUBLISHING_AUTOMATION_ENABLED: bool = Field(
+        default=False,
+        description="Enable automated background publishing to external platforms. Must remain false during deployment testing to prevent unintended public posts."
+    )
     CORS_ORIGINS: Union[str, List[str]] = Field(
         default=["https://lovable.dev", "https://lovable.app"],
         description="Allowed CORS origins (comma-separated or list)"
@@ -67,6 +71,8 @@ class Settings(BaseSettings):
     LOCAL_WHISPER_MODEL: str = Field(default="base", description="Whisper model: tiny, base, small, medium, large-v3")
     LOCAL_WHISPER_DEVICE: str = Field(default="auto", description="Whisper device: auto, cpu, cuda")
     LOCAL_OUTPUT_DIR: str = Field(default="output", description="Local directory for temporary renders")
+    TEMP_DIR: str = Field(default="/app/tmp", description="Temporary working directory for video operations")
+
     OUTPUT_DIR: str = Field(default="output", description="Output directory alias")
     DEFAULT_NUM_CLIPS: int = Field(default=3, description="Default number of clips to extract")
     DEFAULT_ASPECT_RATIO: str = Field(default="9:16", description="Default video aspect ratio")

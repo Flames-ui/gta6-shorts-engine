@@ -365,7 +365,7 @@ class DatabaseClient:
                 (
                     job_data["id"],
                     job_data.get("user_id"),
-                    job_data["url"],
+                    job_data.get("url", ""),
                     job_data.get("category_id", "gaming"),
                     job_data.get("status", "queued"),
                     job_data.get("stage", "pending"),

@@ -1,74 +1,229 @@
 services:
+  # ---------------------------------------------------------------------------
+  # FastAPI Web Service (API, Webhooks, SSE Streams, Dashboard)
+  # ---------------------------------------------------------------------------
   - type: web
     name: gta6-shorts-engine
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: standard
     healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
       - key: ENVIRONMENT
         value: production
       - key: FAIL_CLOSED_IN_PRODUCTION
-        value: "true"
+        value: 'true'
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PORT
+        value: '8000'
+      - key: CORS_ORIGINS
+        value: 'https://lovable.dev,https://lovable.app'
+      - key: PUBLISHING_AUTOMATION_ENABLED
+        value: 'false'
+
+      # Authentication & Encryption Keys (Server-controlled)
       - key: ENGINE_API_KEY
         generateValue: true
+      - key: ENGINE_API_KEY_PREVIOUS
+        sync: false
       - key: TOKEN_ENCRYPTION_KEY
         generateValue: true
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: SUPABASE_JWT_SECRET
-        sync: false
       - key: ADMIN_USER_IDS
         sync: false
       - key: ADMIN_EMAILS
         sync: false
-      - key: CORS_ORIGINS
-        value: "https://lovable.dev,https://lovable.app"
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: gta6-shorts-redis
-          property: connectionString
 
-  - type: worker
-    name: gta6-shorts-worker
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.worker
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: ENVIRONMENT
-        value: production
-      - key: FAIL_CLOSED_IN_PRODUCTION
-        value: "true"
-      - key: ENGINE_API_KEY
-        sync: false
-      - key: TOKEN_ENCRYPTION_KEY
-        sync: false
+      # Supabase Integration (PostgreSQL Database, Auth & Private Media Storage)
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: SUPABASE_JWT_SECRET
         sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: shorts
+
+      # Shared Private Redis Queue
       - key: REDIS_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: gta6-shorts-redis
           property: connectionString
-      - key: OUTPUT_DIR
-        value: /opt/render/project/src/output
-      - key: TEMP_DIR
-        value: /opt/render/project/src/tmp
+      - key: QUEUE_NAME
+        value: viral-shorts
 
-  - type: redis
+      # AI Provider Credentials (Gemini primary, OpenAI fallback)
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+
+      # Buffer Social Publishing Integration (OAuth 2.0)
+      - key: BUFFER_CLIENT_ID
+        sync: false
+      - key: BUFFER_CLIENT_SECRET
+        sync: false
+      - key: BUFFER_REDIRECT_URI
+        sync: false
+
+      # YouTube Data API Direct Publishing (OAuth 2.0)
+      - key: YOUTUBE_CLIENT_ID
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_REDIRECT_URI
+        sync: false
+
+      # Output & Temporary Rendering Directories
+      - key: OUTPUT_DIR
+        value: /app/output
+      - key: LOCAL_OUTPUT_DIR
+        value: /app/output
+      - key: TEMP_DIR
+        value: /app/tmp
+
+  # ---------------------------------------------------------------------------
+  # Background Video Processing Worker (FFmpeg, Whisper, OpenCV, Transcoding)
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: gta6-shorts-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker
+    plan: standard
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: FAIL_CLOSED_IN_PRODUCTION
+        value: 'true'
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PUBLISHING_AUTOMATION_ENABLED
+        value: 'false'
+
+      # Synchronized Authentication & Encryption Keys from Web Service
+      - key: ENGINE_API_KEY
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: ENGINE_API_KEY
+      - key: TOKEN_ENCRYPTION_KEY
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: TOKEN_ENCRYPTION_KEY
+
+      # Supabase Credentials (Database & Storage Access)
+      - key: SUPABASE_URL
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: SUPABASE_URL
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: SUPABASE_SERVICE_ROLE_KEY
+      - key: SUPABASE_JWT_SECRET
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: SUPABASE_JWT_SECRET
+      - key: SUPABASE_STORAGE_BUCKET
+        value: shorts
+
+      # Shared Private Redis Queue & Concurrency Controls
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: gta6-shorts-redis
+          property: connectionString
+      - key: QUEUE_NAME
+        value: viral-shorts
+      - key: MAX_CONCURRENT_JOBS
+        value: '2'
+      - key: JOB_TIMEOUT_SECONDS
+        value: '1800'
+
+      # AI Models (Gemini & OpenAI)
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: GEMINI_API_KEY
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OPENAI_API_KEY
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: OPENAI_API_KEY
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+
+      # Publishing Credentials (Buffer & YouTube)
+      - key: BUFFER_CLIENT_ID
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: BUFFER_CLIENT_ID
+      - key: BUFFER_CLIENT_SECRET
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: BUFFER_CLIENT_SECRET
+      - key: BUFFER_REDIRECT_URI
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: BUFFER_REDIRECT_URI
+      - key: YOUTUBE_CLIENT_ID
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: YOUTUBE_CLIENT_ID
+      - key: YOUTUBE_CLIENT_SECRET
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: YOUTUBE_CLIENT_SECRET
+      - key: YOUTUBE_REDIRECT_URI
+        fromService:
+          type: web
+          name: gta6-shorts-engine
+          envVarKey: YOUTUBE_REDIRECT_URI
+
+      # Local Whisper & Video Processing System Paths
+      - key: LOCAL_WHISPER_MODEL
+        value: base
+      - key: LOCAL_WHISPER_DEVICE
+        value: cpu
+      - key: OUTPUT_DIR
+        value: /app/output
+      - key: LOCAL_OUTPUT_DIR
+        value: /app/output
+      - key: TEMP_DIR
+        value: /app/tmp
+      - key: DAILY_TARGET_MIN
+        value: '15'
+      - key: DAILY_TARGET_MAX
+        value: '20'
+
+  # ---------------------------------------------------------------------------
+  # Private Redis (Task Queue & Distributed Locks)
+  # ---------------------------------------------------------------------------
+  - type: keyvalue
     name: gta6-shorts-redis
     plan: starter
     ipAllowList: []

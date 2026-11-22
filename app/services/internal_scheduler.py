@@ -296,6 +296,10 @@ class InternalSchedulerService:
         Dispatcher that scans internal publishing queue and triggers publications
         whose scheduled_for timestamp has arrived.
         """
+        if not getattr(settings, "PUBLISHING_AUTOMATION_ENABLED", False):
+            logger.info("Publishing automation is disabled (PUBLISHING_AUTOMATION_ENABLED=false); skipping dispatch.")
+            return {"dispatched": 0, "status": "disabled", "reason": "PUBLISHING_AUTOMATION_ENABLED is false"}
+
         if self.is_paused:
             logger.info("Internal scheduler is paused; skipping dispatch.")
             return {"dispatched": 0, "status": "paused"}
