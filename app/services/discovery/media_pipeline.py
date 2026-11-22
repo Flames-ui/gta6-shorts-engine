@@ -23,6 +23,7 @@ from .moment_detection import (
     analyze_footage,
 )
 from .poll_eligibility import evaluate_poll_eligibility
+from .semantic_moments import SemanticFn, default_semantic_fn
 from .rights_manager import rights_manager
 from .youtube_metadata import (
     YouTubeMetadataError,
@@ -272,8 +273,12 @@ def analyze_item(
     score_fn: Optional[ScoreFn] = None,
     now: Optional[datetime] = None,
     in_background: bool = False,
+    semantic_fn: Optional[SemanticFn] = None,
 ) -> Dict[str, Any]:
-    """Run motion, audio and scoring on validated footage. Only qualifying windows (score >= 75) are kept."""
+    """Run motion, audio, semantic and scoring on validated footage. Only qualifying windows (score >= 75) are kept.
+
+    Analysis needs a semantic provider: without one the item is blocked, not scored with guessed evidence.
+    """
     item = _load(item_id)
     source = _load_source(item)
     source_id = item.get("source_id")
@@ -288,6 +293,13 @@ def analyze_item(
         _update_analysis(item_id, {"analysis_status": "blocked", "analysis_reason": "media_not_validated"})
         _log("analysis", item_id, source_id, "blocked", reason="media_not_validated")
         return {"item_id": item_id, "analysis_status": "blocked", "analysis_reason": "media_not_validated"}
+
+    semantic = semantic_fn if semantic_fn is not None else default_semantic_fn()
+    if semantic is None:
+        reason = "semantic_provider_not_configured"
+        _update_analysis(item_id, {"analysis_status": "blocked", "analysis_reason": reason})
+        _log("analysis", item_id, source_id, "blocked", reason=reason)
+        return {"item_id": item_id, "analysis_status": "blocked", "analysis_reason": reason}
 
     probe = item.get("media_probe") or {}
     duration = float(probe.get("duration_seconds") or 0.0)
@@ -320,7 +332,7 @@ def analyze_item(
 
     try:
         analysis = analyze_footage(path, item_id=item_id, source_id=str(source_id), duration=duration,
-                                   max_seconds=limit, score_fn=score_fn)
+                                   max_seconds=limit, score_fn=score_fn, semantic_fn=semantic)
     except MomentAnalysisError as exc:
         _update_analysis(item_id, {"analysis_status": "failed", "analysis_reason": exc.code})
         _log("analysis", item_id, source_id, "failed", reason=exc.code)
