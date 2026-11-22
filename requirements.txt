@@ -28,3 +28,6 @@ google-auth-httplib2>=0.2.0
 
 # Testing & Quality
 pytest>=8.0.0
+
+# Browser Automation & Marketplace Operator
+playwright>=1.40.0

@@ -1,10 +1,11 @@
-"""Content Rewards marketplace adapter with compliant discovery and manual rule import."""
+"""Content Rewards marketplace adapter with compliant discovery, browser operator, and manual rule import."""
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .base import BaseMarketplaceAdapter
+from .content_rewards_operator import content_rewards_operator
 from ..campaign_rule_reader import campaign_rule_reader
 
 logger = logging.getLogger("gta6_shorts.marketplace.content_rewards")
@@ -14,7 +15,8 @@ class ContentRewardsAdapter(BaseMarketplaceAdapter):
     """
     Adapter for Content Rewards (https://contentrewards.com).
     Adheres strictly to safe discovery without bypassing CAPTCHA, authentication,
-    or platform terms. Provides compliant manual operator import when automation is restricted.
+    or platform terms. Connects to dedicated persistent browser operator (Milestone 2)
+    or provides compliant manual operator import when unauthenticated.
     Never fabricates sample campaigns, invented reward rates, or simulated live data.
     """
 
@@ -24,27 +26,13 @@ class ContentRewardsAdapter(BaseMarketplaceAdapter):
             marketplace_name="Content Rewards",
             base_url="https://contentrewards.com",
         )
-        self.session_authenticated = False
-        self.last_captcha_detected = False
 
     def check_session_status(self) -> Dict[str, Any]:
         """
-        Detects authentication, 2FA, or CAPTCHA barriers.
+        Detects authentication, 2FA, or CAPTCHA barriers via the browser operator.
         Pauses for the human operator when verification is required.
         """
-        return {
-            "marketplace_id": self.marketplace_id,
-            "base_url": self.base_url,
-            "authenticated": self.session_authenticated,
-            "captcha_detected": self.last_captcha_detected,
-            "operator_action_required": not self.session_authenticated or self.last_captcha_detected,
-            "status_message": (
-                "Operator login or CAPTCHA verification required on Content Rewards. "
-                "Compliant manual workflow is active."
-                if (not self.session_authenticated or self.last_captcha_detected)
-                else "Session active and operational."
-            ),
-        }
+        return content_rewards_operator.check_session_status()
 
     def discover_campaigns(self, limit: int = 20) -> List[Dict[str, Any]]:
         """
@@ -52,23 +40,26 @@ class ContentRewardsAdapter(BaseMarketplaceAdapter):
         If live authenticated browser session is not established, returns an empty list
         with discovery mode set to 'manual_import_only'. Never fabricates sample data.
         """
-        if not self.session_authenticated:
+        status = self.check_session_status()
+        if not status.get("authenticated"):
             logger.info("Content Rewards discovery: Unauthenticated session. Manual import required.")
             return []
-        
-        # When browser operator is connected (Milestone 2), real discovered campaigns are returned
-        return []
+
+        # Authenticated browser operator discovery
+        return content_rewards_operator.discover_live_campaigns(limit=limit)
 
     def get_discovery_status(self) -> Dict[str, Any]:
         """Provides status of discovery integration."""
+        status = self.check_session_status()
+        is_auth = status.get("authenticated", False)
         return {
             "marketplace_id": self.marketplace_id,
-            "live_discovery_supported": self.session_authenticated,
-            "discovery_mode": "live_browser" if self.session_authenticated else "manual_import_only",
+            "live_discovery_supported": is_auth,
+            "discovery_mode": "live_browser" if is_auth else "manual_import_only",
             "message": (
-                "Live marketplace discovery active."
-                if self.session_authenticated
-                else "Live discovery requires authenticated browser operator (Milestone 2). Use manual import (POST /api/v1/campaigns/import)."
+                "Live marketplace discovery active via authenticated browser session."
+                if is_auth
+                else "Live discovery requires authenticated browser operator session. Use manual import (POST /api/v1/campaigns/import)."
             ),
         }
 
@@ -77,6 +68,12 @@ class ContentRewardsAdapter(BaseMarketplaceAdapter):
         Fetch details for a given campaign identifier or URL.
         Never fabricates invented defaults. If unauthenticated, returns empty structure.
         """
+        status = self.check_session_status()
+        if status.get("authenticated") and str(campaign_url_or_id).startswith("http"):
+            extracted = content_rewards_operator.extract_campaign_details(campaign_url_or_id)
+            if extracted:
+                return extracted
+
         return {
             "campaign_external_id": None,
             "name": None,
@@ -135,8 +132,8 @@ class ContentRewardsAdapter(BaseMarketplaceAdapter):
             "required_captions": analysis.required_captions or meta.get("required_captions"),
             "min_clip_duration_seconds": analysis.min_clip_duration_seconds or meta.get("min_clip_duration_seconds"),
             "max_clip_duration_seconds": analysis.max_clip_duration_seconds or meta.get("max_clip_duration_seconds"),
-            "resolution_requirements": meta.get("resolution_requirements") or "1080x1920",
-            "aspect_ratio": meta.get("aspect_ratio") or "9:16",
+            "resolution_requirements": meta.get("resolution_requirements"),
+            "aspect_ratio": meta.get("aspect_ratio"),
             "reward_model": analysis.reward_model or meta.get("reward_model"),
             "payout_amount": analysis.payout_amount if analysis.payout_amount is not None else meta.get("payout_amount"),
             "cpm": analysis.cpm if analysis.cpm is not None else meta.get("cpm"),

@@ -472,3 +472,65 @@ The system has been enhanced with a private, single-operator campaign clipping e
 | `GET` | `/api/v1/clips/{clip_id}/compliance` | Inspect 10-point compliance results for a clip |
 | `POST` | `/api/v1/campaigns/{id}/submit` | Record live submission evidence for earnings verification |
 | `GET` | `/api/v1/campaigns/earnings/summary` | Progress toward $500 30-day earnings target |
+
+---
+
+## Milestone 2: Automated Creator-Rewards Marketplace Operator
+
+Milestone 2 extends the clipping engine with a dedicated, persistent browser operator designed for creator-rewards marketplaces (specifically Content Rewards), while respecting website terms, strict resource limits (512MB RAM on Render), and zero-fabrication safety gates.
+
+### Core Architecture & Capabilities
+
+1. **Persistent Browser Automation (`app/services/browser_manager.py`)**
+   - Single dedicated Chromium instance launched via Playwright.
+   - Resource-bounded for 512MB RAM environments with `--no-sandbox`, `--disable-dev-shm-usage`, and `--js-flags=--max-old-space-size=256`.
+   - Automatic crash recovery and health monitoring.
+   - Diagnostic screenshots saved under `/tmp/browser_diagnostics/` for operator inspection without leaking secrets or credentials.
+
+2. **First-Time Operator Login & Human Verification**
+   - Supports compliant human login workflows without storing or requiring plaintext credentials.
+   - Navigates to the official login portal and captures status diagnostics.
+   - Automatically detects Cloudflare, Turnstile, hCaptcha, and 2FA challenges, pausing for the operator.
+   - Persists verified browser sessions encrypted at rest with Fernet (`session.enc`), decryptable only by the server runtime.
+   - Never exposes session tokens, cookies, or credentials in API responses.
+
+3. **Discovery & Rule Extraction Operator (`app/services/marketplaces/content_rewards_operator.py`)**
+   - Navigates to active discovery catalogs and opens campaign detail pages.
+   - Extracts complete original instructions and saves unedited text alongside structured analysis.
+   - Filters strictly for gaming content (GTA 6, etc.) and accepted short-form platforms (TikTok, YouTube Shorts).
+   - Rejects non-gaming categories (sports, fashion, lifestyle) and unsupported publishing destinations.
+
+4. **Transparent Opportunity Scoring (`app/services/opportunity_scorer.py`)**
+   - Evaluates campaigns on a 0-100 scale across five objective criteria:
+     - **Platform Fit (25 pts)**: Dual-reach (TikTok + YouTube Shorts) vs single platform.
+     - **Reward Model (35 pts)**: Verified CPM rates ($3.50+ high tier, $1.50+ standard tier) or major prize pools.
+     - **Budget Capacity (20 pts)**: Remaining budget headroom (> $1,000) and view capacity.
+     - **Production Feasibility (10 pts)**: Standard 15-60s Shorts duration window.
+     - **Approval Simplicity (10 pts)**: Instant participation vs manual brand approval requirements.
+   - Assigns unambiguous tiers (`HIGH`, `MEDIUM`, `LOW`, `REJECTED`, `EXHAUSTED`).
+   - Explains exactly why a campaign is ranked favorably or filtered out.
+
+5. **Campaign Application & Terms Protection**
+   - Supports automated joining only where permitted.
+   - Strictly requires explicit operator approval before submitting applications or accepting terms.
+   - Automatically flags `awaiting_brand_approval` when campaigns require sponsor review before clipping.
+
+6. **Operator Action Queue & Scheduler (`app/services/operator_action_queue.py`, `app/services/campaign_scheduler.py`)**
+   - Queues human interventions (`login_required`, `captcha_or_2fa_required`, `campaign_needs_review`, `campaign_expired`, `campaign_exhausted`).
+   - Rate-limit-conscious background refresh cycles recalculate scores and detect deadline expirations.
+
+### Marketplace Operator API Endpoints
+
+| Method | Endpoint | Description |
+|:---|:---|:---|
+| `GET` | `/api/v1/marketplace/browser/status` | Check browser health, memory usage, and Content Rewards session status |
+| `POST` | `/api/v1/marketplace/browser/start` | Launch dedicated persistent Chromium browser session |
+| `POST` | `/api/v1/marketplace/browser/stop` | Gracefully terminate browser session and save encrypted state |
+| `POST` | `/api/v1/marketplace/operator/login-request` | Navigate to login portal, capture diagnostics, and queue login action |
+| `POST` | `/api/v1/marketplace/operator/login-resume` | Verify login indicators, persist encrypted session, and clear alerts |
+| `POST` | `/api/v1/marketplace/campaigns/discover-live` | Execute live browser discovery on Content Rewards (requires authenticated session) |
+| `GET` | `/api/v1/marketplace/campaigns/{id}/opportunity` | View transparent 0-100 opportunity score and ranking explanation |
+| `POST` | `/api/v1/marketplace/campaigns/{id}/apply` | Submit campaign application with explicit operator terms approval |
+| `GET` | `/api/v1/marketplace/actions` | List active operator intervention alerts and pending actions |
+| `POST` | `/api/v1/marketplace/actions/{id}/resolve` | Mark an operator action resolved |
+| `POST` | `/api/v1/marketplace/scheduler/refresh` | Trigger immediate background campaign refresh cycle |

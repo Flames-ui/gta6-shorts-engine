@@ -4,6 +4,7 @@ from .endpoints import (
     analytics,
     audit_logs,
     campaigns,
+    marketplace_operator,
     auth,
     autonomous,
     categories,
@@ -39,3 +40,4 @@ api_v1_router.include_router(quotas.router)
 api_v1_router.include_router(channels.router)
 api_v1_router.include_router(audit_logs.router)
 api_v1_router.include_router(campaigns.router)
+api_v1_router.include_router(marketplace_operator.router)

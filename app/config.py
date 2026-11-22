@@ -35,6 +35,14 @@ class Settings(BaseSettings):
         description="Allowed CORS origins (comma-separated or list)"
     )
 
+    # Browser Automation & Marketplace Operator (Milestone 2)
+    BROWSER_PROFILE_DIR: str = Field(default="/tmp/browser_profile", description="Directory for persistent browser profile and cookies")
+    BROWSER_HEADLESS: bool = Field(default=True, description="Run Playwright browser in headless mode")
+    BROWSER_NAVIGATION_TIMEOUT_MS: int = Field(default=30000, description="Default page navigation timeout in milliseconds")
+    BROWSER_MAX_MEMORY_MB: int = Field(default=256, description="Memory constraint for browser process on 512MB RAM instance")
+    CONTENT_REWARDS_BASE_URL: str = Field(default="https://contentrewards.com", description="Official Content Rewards website base URL")
+    CAMPAIGN_REFRESH_INTERVAL_MINUTES: int = Field(default=60, description="Interval for background campaign detail refresh")
+
     # Supabase Integration
     SUPABASE_URL: str = Field(default="", description="Supabase project URL")
     SUPABASE_SERVICE_ROLE_KEY: str = Field(default="", description="Supabase service role secret key")
