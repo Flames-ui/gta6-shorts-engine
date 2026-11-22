@@ -340,6 +340,20 @@ async def get_discovery_feed(
     return response_items
 
 
+def _resolve_metadata_after_poll(user_id: Optional[str]) -> Dict:
+    """Resolve YouTube metadata for every unresolved unprocessed item in scope. A failure never fails the poll."""
+    try:
+        items = db.list_discovered_content(user_id=user_id, is_processed=False, limit=200)
+        ids = _media_pipeline.unresolved_item_ids(items)
+        summary = _media_pipeline.resolve_metadata_batch(ids) if ids else {
+            "requested": 0, "resolved": 0, "failed": 0, "api_call_attempts": 0, "failure_codes": {}}
+    except Exception as exc:
+        summary = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        logger.warning("discovery.poll.metadata_error %s", json.dumps(summary))
+    logger.info("discovery.poll.metadata %s", json.dumps(summary, default=str))
+    return summary
+
+
 @router.post("/poll")
 async def poll_content_sources(
     source_id: Optional[str] = Query(None, description="Optional specific source ID to poll"),
@@ -468,6 +482,7 @@ async def poll_content_sources(
         source_results.append(result)
         logger.info("discovery.poll.source_result %s", json.dumps(result, default=str))
 
+    metadata_resolution = _resolve_metadata_after_poll(user_id)
     response = {
         "polled_sources": total_polled,
         "new_items_discovered": new_items_count,
@@ -479,6 +494,7 @@ async def poll_content_sources(
         "eligible_sources": len(eligible),
         "excluded_sources": [d.as_dict() for d in excluded],
         "source_results": source_results,
+        "metadata_resolution": metadata_resolution,
     }
     logger.info("discovery.poll.result %s", json.dumps(response, default=str))
     return response
@@ -588,6 +604,17 @@ def resolve_item_metadata(item_id: str, auth: AuthContext = Depends(verify_api_k
     require_admin(auth)
     _load_item_for(item_id, auth)
     return _media_pipeline.resolve_metadata(item_id)
+
+
+@router.post("/items/resolve-pending")
+def resolve_pending_metadata(
+    limit: int = Query(200, ge=1, le=200, description="Unprocessed items to check, newest first"),
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Resolve YouTube metadata for every unprocessed item that is not resolved yet. Admin only."""
+    require_admin(auth)
+    items = db.list_discovered_content(is_processed=False, limit=limit)
+    return _media_pipeline.resolve_metadata_batch(_media_pipeline.unresolved_item_ids(items))
 
 
 @router.post("/items/{item_id}/media")
