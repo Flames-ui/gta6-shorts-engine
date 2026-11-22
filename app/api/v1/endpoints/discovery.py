@@ -12,7 +12,7 @@ from ....schemas import (
     SourceRightsUpdateRequest,
     SourceUpdateRequest,
 )
-from ....services.discovery.base import RightsStatus
+from ....services.discovery.base import AUTHORIZED_RIGHTS_STATUSES, RightsStatus
 from ....services.discovery.rights_manager import rights_manager
 from ....services.discovery.rss_adapter import RSSDiscoveryAdapter
 from ....services.supabase_client import db
@@ -196,35 +196,74 @@ async def update_source_rights(
     payload: SourceRightsUpdateRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Update or verify the legal reuse rights for a content source. Admin only."""
+    """Record the legal reuse rights for a content source. Admin only.
+
+    Fail-closed write order:
+    1. The source is deactivated first, so no run uses the previous grant while this update is in progress.
+    2. The rights permission is persisted (status, allowed platforms, license, expiry, notes, verified_by).
+       derivative_rights_allowed is true only for an authorized status.
+    3. The audit entry is written. If it cannot be written, the update fails.
+    4. The source is activated only when an authorized status has passed every step above.
+    Any failure returns 503 and leaves the source inactive.
+    """
     require_admin(auth)
 
     source = db.get_source(source_id)
     if not source:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Source {source_id} not found")
 
-    rights_manager.set_permission(
-        source_id=source_id,
-        status=RightsStatus(payload.rights_status),
-        allowed_platforms=payload.allowed_platforms,
-        license_type=payload.license_type,
-        expires_at=payload.expires_at,
-        notes=payload.notes,
-        verified_by=auth.user_id,
-    )
-    db.update_source(source_id, {"is_active": payload.rights_status in (RightsStatus.AUTHORIZED_EDITING.value, RightsStatus.AUTHORIZED_PLATFORMS.value)})
+    rights_status = RightsStatus(payload.rights_status)  # already validated to a RightsStatus value (422 otherwise)
+    is_authorized = rights_status in AUTHORIZED_RIGHTS_STATUSES
+    # verified_by references auth.users (UUID). API-key administrators ("system_admin") have no UUID;
+    # they are recorded as the actor in the audit entry instead.
+    verified_by = _as_uuid(auth.user_id)
+    expires_iso = payload.expires_at.isoformat() if payload.expires_at else None
 
-    db.create_audit_log(
-        action="source_rights_updated",
-        resource_type="source",
-        user_id=auth.user_id,
-        resource_id=source_id,
-        details={"rights_status": payload.rights_status, "allowed_platforms": payload.allowed_platforms, "notes": payload.notes},
-    )
+    try:
+        db.update_source(source_id, {"is_active": False})
+        rights_manager.set_permission(
+            source_id=source_id,
+            status=rights_status,
+            allowed_platforms=payload.allowed_platforms,
+            license_type=payload.license_type,
+            expires_at=payload.expires_at,
+            notes=payload.notes,
+            verified_by=verified_by,
+            derivative_rights_allowed=is_authorized,
+        )
+        db.create_audit_log(
+            action="source_rights_updated",
+            resource_type="source",
+            user_id=auth.user_id,
+            resource_id=source_id,
+            details={
+                "actor": auth.user_id,
+                "rights_status": rights_status.value,
+                "allowed_platforms": payload.allowed_platforms,
+                "license_type": payload.license_type,
+                "expires_at": expires_iso,
+                "derivative_rights_allowed": is_authorized,
+                "notes": payload.notes,
+            },
+            required=True,
+        )
+        if is_authorized:
+            db.update_source(source_id, {"is_active": True})
+    except Exception:
+        logger.exception("Rights update failed for source %s; source left inactive", source_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rights could not be recorded, so the source is not active. Retry the update.",
+        )
+
     return {
         "source_id": source_id,
-        "rights_status": payload.rights_status,
+        "rights_status": rights_status.value,
         "allowed_platforms": payload.allowed_platforms,
+        "license_type": payload.license_type,
+        "expires_at": expires_iso,
+        "derivative_rights_allowed": is_authorized,
+        "is_active": is_authorized,
         "status": "updated",
     }
 

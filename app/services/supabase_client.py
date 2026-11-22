@@ -7,12 +7,21 @@ import logging
 import os
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import settings
 
 logger = logging.getLogger("gta6_shorts.supabase")
+
+
+def _is_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 class DatabaseClient:
@@ -1566,7 +1575,9 @@ class DatabaseClient:
         resource_id: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
         ip_address: Optional[str] = None,
+        required: bool = False,
     ) -> Dict[str, Any]:
+        """Write an audit entry. With required=True a failed write raises so the caller can fail closed."""
         log_id = str(uuid.uuid4())
         now_iso = datetime.now(timezone.utc).isoformat()
         entry = {
@@ -1581,9 +1592,17 @@ class DatabaseClient:
         }
 
         if self.has_supabase:
+            db_entry = dict(entry)
+            if user_id and not _is_uuid(user_id):
+                # audit_logs.user_id is a UUID reference to auth.users. Non-UUID actors such as the
+                # API-key "system_admin" are kept in details.actor instead of failing the insert.
+                db_entry["user_id"] = None
+                db_entry["details"] = {"actor": user_id, **(details or {})}
             try:
-                self.client.table("audit_logs").insert(entry).execute()
+                self.client.table("audit_logs").insert(db_entry).execute()
             except Exception as exc:
+                if required:
+                    raise
                 logger.error("Failed to persist audit log to Supabase: %s", exc)
             return entry
 
@@ -1597,6 +1616,8 @@ class DatabaseClient:
                     (log_id, user_id, action, resource_type, resource_id, json.dumps(details or {}), ip_address, now_iso),
                 )
         except Exception as exc:
+            if required:
+                raise
             logger.error("Failed to persist audit log to SQLite: %s", exc)
         return entry
 

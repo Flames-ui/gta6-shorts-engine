@@ -1,10 +1,25 @@
 """Comprehensive Pydantic request and response schemas for multi-category production engine."""
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .services.discovery.base import AUTHORIZED_RIGHTS_STATUSES, RightsStatus
 from .services.security import validate_safe_url
+
+RIGHTS_STATUS_VALUES = tuple(status.value for status in RightsStatus)
+_RIGHTS_STATUS_HINTS = {
+    "authorized": "use 'authorized_editing' for footage authorized for editing, or 'authorized_platforms' with allowed_platforms",
+}
+
+
+def _validate_rights_status(value: str) -> str:
+    """Accept only the RightsStatus values; anything else is rejected with a 422 listing the valid ones."""
+    if value in RIGHTS_STATUS_VALUES:
+        return value
+    hint = _RIGHTS_STATUS_HINTS.get(value)
+    message = f"rights_status must be one of: {', '.join(RIGHTS_STATUS_VALUES)}; got '{value}'"
+    raise ValueError(f"{message}. {hint.capitalize()}." if hint else message)
 
 
 class JobStatus(str, Enum):
@@ -241,6 +256,11 @@ class SourceCreateRequest(BaseModel):
     license_type: Optional[str] = None
     allowed_platforms: List[str] = ["tiktok", "youtube_shorts"]
 
+    @field_validator("rights_status")
+    @classmethod
+    def _check_rights_status(cls, value: str) -> str:
+        return _validate_rights_status(value)
+
 
 class SourceUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -251,11 +271,41 @@ class SourceUpdateRequest(BaseModel):
 
 
 class SourceRightsUpdateRequest(BaseModel):
-    rights_status: str = Field(..., description="authorized_editing, authorized_platforms, rejected, expired")
+    rights_status: str = Field(
+        ...,
+        description="One of: pending_verification, authorized_editing, authorized_platforms, rejected, expired",
+    )
     allowed_platforms: List[str] = ["tiktok", "youtube_shorts"]
     license_type: Optional[str] = None
     expires_at: Optional[datetime] = None
     notes: Optional[str] = None
+
+    @field_validator("rights_status")
+    @classmethod
+    def _check_rights_status(cls, value: str) -> str:
+        return _validate_rights_status(value)
+
+    @field_validator("allowed_platforms")
+    @classmethod
+    def _normalize_platforms(cls, value: List[str]) -> List[str]:
+        seen: List[str] = []
+        for platform in value:
+            name = (platform or "").strip().lower()
+            if name and name not in seen:
+                seen.append(name)
+        return seen
+
+    @model_validator(mode="after")
+    def _check_authorization_fields(self):
+        status_value = RightsStatus(self.rights_status)
+        if status_value in AUTHORIZED_RIGHTS_STATUSES:
+            if status_value == RightsStatus.AUTHORIZED_PLATFORMS and not self.allowed_platforms:
+                raise ValueError("allowed_platforms must list at least one platform for 'authorized_platforms'")
+            if self.expires_at is not None:
+                expires = self.expires_at if self.expires_at.tzinfo else self.expires_at.replace(tzinfo=timezone.utc)
+                if expires <= datetime.now(timezone.utc):
+                    raise ValueError("expires_at must be in the future for an authorized rights status")
+        return self
 
 
 class DiscoveredItemResponse(BaseModel):

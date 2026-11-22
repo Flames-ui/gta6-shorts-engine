@@ -14,6 +14,10 @@ class RightsStatus(str, Enum):
     EXPIRED = "expired"
 
 
+# Statuses that grant reuse rights. Every other status keeps the source inactive and blocks production.
+AUTHORIZED_RIGHTS_STATUSES = frozenset({RightsStatus.AUTHORIZED_EDITING, RightsStatus.AUTHORIZED_PLATFORMS})
+
+
 class SourceType(str, Enum):
     OFFICIAL_API = "official_api"
     APPROVED_RSS = "approved_rss"

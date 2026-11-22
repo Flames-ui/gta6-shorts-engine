@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..supabase_client import db
-from .base import DiscoveredContentItem, RightsStatus
+from .base import AUTHORIZED_RIGHTS_STATUSES, DiscoveredContentItem, RightsStatus
+
+_AUTHORIZED_VALUES = frozenset(status.value for status in AUTHORIZED_RIGHTS_STATUSES)
 
 logger = logging.getLogger("gta6_shorts.rights")
 
@@ -29,7 +31,7 @@ class RightsManager:
         original_creator: Optional[str] = None,
         source_url: Optional[str] = None,
         permission_evidence: Optional[str] = None,
-        derivative_rights_allowed: bool = True,
+        derivative_rights_allowed: Optional[bool] = None,
         revoked_at: Optional[datetime] = None,
     ):
         """
@@ -40,6 +42,14 @@ class RightsManager:
         platforms = allowed_platforms or ["tiktok", "youtube_shorts"]
         expires_str = expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at
         revoked_str = revoked_at.isoformat() if isinstance(revoked_at, datetime) else revoked_at
+        # Derivative editing is granted only by an authorized status that is not revoked.
+        # A caller may narrow this with False, but can never grant it for a pending, rejected or expired status.
+        is_authorized = status_val in _AUTHORIZED_VALUES
+        derivative_rights_allowed = (
+            is_authorized
+            and revoked_at is None
+            and (derivative_rights_allowed is None or bool(derivative_rights_allowed))
+        )
 
         # No "id" here: source_permissions.id is a UUID primary key with DEFAULT gen_random_uuid().
         # The database keeps the existing id on conflict (source_id), so re-saving never changes it.
@@ -127,6 +137,9 @@ class RightsManager:
                     "notes": stored.get("verification_notes"),
                     "verified_by": stored.get("verified_by"),
                     "attribution_requirements": stored.get("attribution_requirements"),
+                    # Missing or NULL means no derivative rights (fail-closed).
+                    "derivative_rights_allowed": bool(stored.get("derivative_rights_allowed", False)),
+                    "revoked_at": stored.get("revoked_at"),
                     "updated_at": datetime.now(timezone.utc),
                 }
                 self._source_permissions[source_id] = cached
@@ -147,12 +160,12 @@ class RightsManager:
         if perm.get("revoked_at"):
             return False, f"Content reuse authorization was revoked on {perm['revoked_at']}."
 
-        if not perm.get("derivative_rights_allowed", True):
-            return False, "Derivative editing rights are not authorized for this source."
-
         status = perm["rights_status"]
         if status == RightsStatus.REJECTED:
             return False, "Content reuse authorization was explicitly rejected or revoked."
+
+        if status == RightsStatus.EXPIRED:
+            return False, "Content reuse authorization has expired."
 
         if status == RightsStatus.PENDING_VERIFICATION:
             return False, "Content is pending verification. Cannot process without confirmed authorization."
@@ -175,6 +188,11 @@ class RightsManager:
             allowed = [p.lower() for p in perm.get("allowed_platforms", [])]
             if target_platform.lower() not in allowed:
                 return False, f"Platform '{target_platform}' is not authorized in licensing."
+
+        # Checked after the status-specific rules so each block keeps its own reason.
+        # A missing flag means no derivative rights (fail-closed).
+        if not perm.get("derivative_rights_allowed", False):
+            return False, "Derivative editing rights are not authorized for this source."
 
         if status in (RightsStatus.AUTHORIZED_EDITING, RightsStatus.AUTHORIZED_PLATFORMS):
             return True, "Authorized for video editing and derivative production."
