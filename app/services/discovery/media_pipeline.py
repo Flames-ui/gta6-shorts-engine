@@ -8,13 +8,20 @@ import json
 import logging
 import os
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ..campaign_eligibility import CampaignEligibilityService
 from ..supabase_client import db
 from .media_ingestion import MediaIngestionError, check_authorized_media_url, ingest_authorized_media
-from .moment_detection import MAX_ANALYSIS_SECONDS, MomentAnalysisError, ScoreFn, analyze_footage
+from .moment_detection import (
+    MAX_ANALYSIS_SECONDS,
+    MAX_BACKGROUND_SECONDS,
+    MomentAnalysisError,
+    ScoreFn,
+    analyze_footage,
+)
 from .poll_eligibility import evaluate_poll_eligibility
 from .rights_manager import rights_manager
 from .youtube_metadata import (
@@ -173,32 +180,90 @@ def ingest_media(
 
 # ---------------------------------------------------------------- analysis and gates
 
+BACKGROUND_JOB_TIMEOUT_SECONDS = 6 * 3600
+
+
+def campaign_gate_inputs(source: Optional[Dict[str, Any]]):
+    """Find the campaign and the campaign-linked footage record the production gate checks.
+
+    The discovery source must have a campaign_sources record with the same id, and that record must name
+    an existing campaign. Returns (campaign, campaign_source, reason); reason is None only when both are linked.
+    """
+    if source is None:
+        return None, None, "source_not_found"
+    campaign_source = db.get_campaign_source(str(source.get("id")))
+    if not campaign_source:
+        return None, None, "no_campaign_source_record"
+    campaign_id = campaign_source.get("campaign_id")
+    if not campaign_id:
+        return None, campaign_source, "campaign_source_unlinked"
+    campaign = db.get_campaign(str(campaign_id))
+    if not campaign:
+        return None, campaign_source, "campaign_not_found"
+    return campaign, campaign_source, None
+
+
 def render_gate(item: Dict[str, Any], source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Evaluate every render requirement. This only reports; nothing is rendered from here."""
+    """Evaluate every render requirement against the real campaign. This only reports; nothing is rendered here."""
     decision, rights_reason = _rights_decision(source)
     permission = rights_manager.get_permission(str(source.get("id"))) if source else None
-    campaign_ok, campaign_reason, checks = CampaignEligibilityService().validate_clipping_gate(
-        None, None, target_platform=RENDER_TARGET_PLATFORM,
-    )
+    campaign, campaign_source, link_reason = campaign_gate_inputs(source)
+    if link_reason:
+        campaign_ok, campaign_reason, checks = False, f"campaign_link:{link_reason}", {}
+    else:
+        campaign_ok, message, checks = CampaignEligibilityService().validate_clipping_gate(
+            campaign, campaign_source, target_platform=RENDER_TARGET_PLATFORM,
+        )
+        campaign_reason = None if campaign_ok else message
     media_ok = item.get("media_status") == "validated" and bool(item.get("media_sha256"))
     reasons = []
     if rights_reason:
         reasons.append(rights_reason)
     if not media_ok:
         reasons.append("media_not_validated")
-    if not campaign_ok:
+    if campaign_reason:
         reasons.append(campaign_reason)
     status = permission.get("rights_status") if permission else None
-    return {
+    gate = {
         "allowed": not reasons,
         "reasons": reasons,
         "rights_status": getattr(status, "value", status),
+        "campaign_id": campaign.get("id") if campaign else None,
         "campaign_checks": checks,
     }
+    _log("render_gate", str(item.get("id")), str(item.get("source_id")),
+         "allowed" if gate["allowed"] else "blocked", reasons=reasons, campaign_id=gate["campaign_id"])
+    return gate
 
 
 def _update_analysis(item_id: str, updates: Dict[str, Any]) -> None:
     db.update_discovered_content(item_id, {**updates, "analysis_checked_at": _now_iso()})
+
+
+def enqueue_background_analysis(item_id: str, source_id: Optional[str]) -> Dict[str, Any]:
+    """Hand footage longer than the synchronous limit to the background worker. Fails visibly if no queue."""
+    from ...queue import job_queue
+
+    job_id = f"discovery-analysis-{_safe(item_id)}-{uuid.uuid4().hex[:8]}"
+    try:
+        queued = bool(job_queue.enqueue_job(run_analysis_job, job_id, item_id, timeout=BACKGROUND_JOB_TIMEOUT_SECONDS))
+    except Exception as exc:  # production enqueue raises when Redis is unreachable
+        logger.error("discovery.pipeline enqueue failed item=%s error=%s", item_id, exc)
+        queued = False
+    if queued:
+        _update_analysis(item_id, {"analysis_status": "queued", "analysis_reason": "background_analysis_queued"})
+        _log("analysis", item_id, source_id, "queued", job_id=job_id)
+        return {"item_id": item_id, "analysis_status": "queued", "analysis_reason": "background_analysis_queued",
+                "job_id": job_id}
+    _update_analysis(item_id, {"analysis_status": "failed", "analysis_reason": "queue_unavailable"})
+    _log("analysis", item_id, source_id, "failed", reason="queue_unavailable")
+    return {"item_id": item_id, "analysis_status": "failed", "analysis_reason": "queue_unavailable"}
+
+
+def run_analysis_job(job_id: str, item_id: str) -> Dict[str, Any]:
+    """Background worker entry point for footage longer than the synchronous limit."""
+    _log("analysis", item_id, None, "job_started", job_id=job_id)
+    return analyze_item(item_id, in_background=True)
 
 
 def analyze_item(
@@ -206,6 +271,7 @@ def analyze_item(
     dest_dir: str = DEFAULT_MEDIA_DIR,
     score_fn: Optional[ScoreFn] = None,
     now: Optional[datetime] = None,
+    in_background: bool = False,
 ) -> Dict[str, Any]:
     """Run motion, audio and scoring on validated footage. Only qualifying windows (score >= 75) are kept."""
     item = _load(item_id)
@@ -227,13 +293,19 @@ def analyze_item(
     duration = float(probe.get("duration_seconds") or 0.0)
     if duration <= 0:
         _update_analysis(item_id, {"analysis_status": "blocked", "analysis_reason": "duration_unknown"})
+        _log("analysis", item_id, source_id, "blocked", reason="duration_unknown")
         return {"item_id": item_id, "analysis_status": "blocked", "analysis_reason": "duration_unknown"}
-    if duration > MAX_ANALYSIS_SECONDS:
-        reason = "duration_exceeds_synchronous_limit"
+
+    limit = MAX_BACKGROUND_SECONDS if in_background else MAX_ANALYSIS_SECONDS
+    if duration > limit:
+        if not in_background:
+            return enqueue_background_analysis(item_id, source_id)
+        reason = "duration_exceeds_background_limit"
         _update_analysis(item_id, {"analysis_status": "blocked", "analysis_reason": reason})
         _log("analysis", item_id, source_id, "blocked", reason=reason, duration_seconds=duration)
         return {"item_id": item_id, "analysis_status": "blocked", "analysis_reason": reason}
 
+    _update_analysis(item_id, {"analysis_status": "analyzing", "analysis_reason": None})
     path = os.path.join(dest_dir, f"{_safe(item_id)}-{item['media_sha256'][:16]}.video")
     if not os.path.isfile(path):
         # The local copy is gone (for example after a restart): fetch it again and require the same hash.
@@ -247,7 +319,8 @@ def analyze_item(
         path = restored["path"]
 
     try:
-        analysis = analyze_footage(path, item_id=item_id, source_id=str(source_id), duration=duration, score_fn=score_fn)
+        analysis = analyze_footage(path, item_id=item_id, source_id=str(source_id), duration=duration,
+                                   max_seconds=limit, score_fn=score_fn)
     except MomentAnalysisError as exc:
         _update_analysis(item_id, {"analysis_status": "failed", "analysis_reason": exc.code})
         _log("analysis", item_id, source_id, "failed", reason=exc.code)
@@ -264,7 +337,8 @@ def analyze_item(
         "analysis_candidates": top,
     })
     _log("analysis", item_id, source_id, "completed", reason=reason, candidate_windows=len(analysis["candidates"]),
-         qualifying=len(qualifying), render_allowed=gate["allowed"], render_reasons=gate["reasons"])
+         qualifying=len(qualifying), render_allowed=gate["allowed"], render_reasons=gate["reasons"],
+         duration_seconds=duration, background=in_background)
     return {
         "item_id": item_id,
         "analysis_status": "completed",

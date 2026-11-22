@@ -29,7 +29,8 @@ WINDOW_LENGTH_S = 30.0
 MIN_WINDOW_S = 15.0
 MAX_CANDIDATES = 8
 AUDIO_MATCH_TOLERANCE_S = 1.5
-MAX_ANALYSIS_SECONDS = 600.0  # longer footage needs the background worker, not the request cycle
+MAX_ANALYSIS_SECONDS = 600.0      # longest footage analysed inside the HTTP request cycle
+MAX_BACKGROUND_SECONDS = 4 * 3600.0  # longest footage the background worker will analyse
 
 
 class MomentAnalysisError(Exception):
@@ -120,25 +121,34 @@ def _measured_in_window(timeline: List[Dict[str, Any]], start: float, end: float
     }
 
 
+def _audio_timeout(duration: float) -> int:
+    """FFmpeg audio pass gets time in proportion to the footage length."""
+    return int(max(60.0, duration * 2.0))
+
+
 def analyze_footage(
     path: str,
     *,
     item_id: str,
     source_id: str,
     duration: float,
+    max_seconds: float = MAX_BACKGROUND_SECONDS,
     score_fn: Optional[ScoreFn] = None,
     motion_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
     audio_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Measure motion and audio, pick candidate windows and score each one. Never renders anything."""
-    if duration > MAX_ANALYSIS_SECONDS:
+    if duration > max_seconds:
         raise MomentAnalysisError(
-            "duration_exceeds_synchronous_limit",
-            f"Footage is {duration:.0f}s; synchronous analysis is limited to {MAX_ANALYSIS_SECONDS:.0f}s.",
+            "duration_exceeds_background_limit",
+            f"Footage is {duration:.0f}s; analysis is limited to {max_seconds:.0f}s.",
         )
     score = score_fn or _default_score
     motion = (motion_fn or GameplayAnalyzerService.detect_visual_motion_peaks)(path, sample_interval=0.5)
-    audio = (audio_fn or GameplayAnalyzerService.detect_audio_energy_peaks)(path)
+    if audio_fn is not None:
+        audio = audio_fn(path)
+    else:
+        audio = GameplayAnalyzerService.detect_audio_energy_peaks(path, timeout=_audio_timeout(duration))
     timeline = build_signal_timeline(motion or [], audio or [])
     if not timeline:
         raise MomentAnalysisError("no_motion_signal", "Motion analysis produced no measurable samples.")

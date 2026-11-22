@@ -67,10 +67,22 @@ AUTHORIZED_PERMISSION = {
 
 
 class FakeDB:
-    def __init__(self, item=None, source=PRODUCTION_SOURCE):
+    def __init__(self, item=None, source=PRODUCTION_SOURCE, campaign_source=None, campaign=None):
         self.items = {item["id"]: dict(item)} if item else {}
         self.sources = {source["id"]: dict(source)} if source else {}
+        self.campaign_source = dict(campaign_source) if campaign_source else None
+        self.campaign = dict(campaign) if campaign else None
         self.writes = []
+
+    def get_campaign_source(self, source_id):
+        if self.campaign_source and self.campaign_source["id"] == source_id:
+            return dict(self.campaign_source)
+        return None
+
+    def get_campaign(self, campaign_id):
+        if self.campaign and self.campaign["id"] == campaign_id:
+            return dict(self.campaign)
+        return None
 
     def get_discovered_content(self, item_id):
         return dict(self.items[item_id]) if item_id in self.items else None
@@ -501,11 +513,33 @@ def test_minimum_score_of_75_is_the_only_qualifying_rule(score, qualifies):
     assert bool(result["qualifying"]) is qualifies
 
 
-def test_analysis_refuses_footage_longer_than_synchronous_limit():
+def test_analysis_refuses_footage_beyond_background_limit():
     with pytest.raises(moment_detection.MomentAnalysisError) as exc:
         moment_detection.analyze_footage("x", item_id="i", source_id="s",
-                                         duration=moment_detection.MAX_ANALYSIS_SECONDS + 1)
-    assert exc.value.code == "duration_exceeds_synchronous_limit"
+                                         duration=moment_detection.MAX_BACKGROUND_SECONDS + 1)
+    assert exc.value.code == "duration_exceeds_background_limit"
+
+
+def test_audio_pass_timeout_scales_with_footage_length():
+    assert moment_detection._audio_timeout(30) == 60
+    assert moment_detection._audio_timeout(3600) == 7200
+
+
+def test_long_footage_timestamps_cover_the_whole_file_not_just_the_first_minutes():
+    """A one-hour file with a single measured burst at 2400s must yield a window that covers 2400s."""
+    motion = [{"time": float(t), "motion": 1.0} for t in range(3600)]
+    motion[2400] = {"time": 2400.0, "motion": 50.0}
+    audio = [{"time": float(t), "energy": 1.0} for t in range(3600)]
+    result = moment_detection.analyze_footage(
+        "x", item_id="i", source_id="s", duration=3600.0,
+        motion_fn=lambda path, sample_interval=0.5: motion,
+        audio_fn=lambda path: audio,
+        score_fn=lambda c: {"total_score": 40.0, "rejection_reasons": ["Missing hook analysis evidence"]},
+    )
+    assert result["candidates"]
+    top = result["candidates"][0]
+    assert top["start_time"] <= 2400.0 <= top["end_time"]
+    assert result["qualifying"] == []
 
 
 @needs_ffmpeg
@@ -635,3 +669,137 @@ def test_pipeline_state_round_trips_through_the_database_layer():
     with pytest.raises(ValueError):
         db.update_discovered_content(item_id, {"rights_status": "authorized_editing"})
 
+
+
+# ---------------------------------------------------------------- campaign gate linkage and background analysis
+
+APPROVED_CAMPAIGN = {
+    "id": "camp_gta6", "status": "approved", "operator_approved": True,
+    "accepted_platforms": ["tiktok"], "eligible_games": ["GTA 6"], "content_categories": ["gaming"],
+    "reward_model": "cpm", "cpm": 2.0, "payout_amount": 0, "remaining_budget": 500,
+    "min_clip_duration_seconds": 15, "max_clip_duration_seconds": 60,
+    "submission_instructions": "Upload to TikTok", "source_video_requirements": "Rights-holder footage",
+    "ambiguities": [],
+}
+LINKED_FOOTAGE = {
+    "id": "src_08a19e7ab7", "campaign_id": "camp_gta6", "source_verification_status": "verified",
+    "authorized_platforms": ["tiktok"], "allowed_derivative_uses": ["short_form_clipping"], "permission_expiry": None,
+}
+VALIDATED_ITEM = dict(PRODUCTION_ITEM, media_status="validated", media_sha256="c" * 64)
+
+
+def _gate_db(monkeypatch, campaign=APPROVED_CAMPAIGN, footage=LINKED_FOOTAGE, permission=AUTHORIZED_PERMISSION):
+    db = FakeDB(campaign_source=footage, campaign=campaign)
+    monkeypatch.setattr(media_pipeline, "db", db)
+    monkeypatch.setattr(media_pipeline, "rights_manager", FakePermissions(permission))
+    return db
+
+
+def test_render_gate_allows_only_with_approved_campaign_and_linked_verified_footage(monkeypatch):
+    _gate_db(monkeypatch)
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is True
+    assert gate["reasons"] == []
+    assert gate["campaign_id"] == "camp_gta6"
+
+
+def test_render_gate_blocks_unapproved_campaign(monkeypatch):
+    _gate_db(monkeypatch, campaign=dict(APPROVED_CAMPAIGN, status="needs_review", operator_approved=False))
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is False
+    assert any("Gate Rejected" in reason for reason in gate["reasons"])
+
+
+def test_render_gate_blocks_footage_linked_to_a_campaign_that_does_not_exist(monkeypatch):
+    _gate_db(monkeypatch, footage=dict(LINKED_FOOTAGE, campaign_id="camp_other"))
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is False
+    assert "campaign_link:campaign_not_found" in gate["reasons"]
+
+
+def test_render_gate_blocks_footage_record_missing_campaign_link(monkeypatch):
+    _gate_db(monkeypatch, footage=dict(LINKED_FOOTAGE, campaign_id=None))
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is False
+    assert "campaign_link:campaign_source_unlinked" in gate["reasons"]
+
+
+def test_render_gate_blocks_unverified_footage(monkeypatch):
+    _gate_db(monkeypatch, footage=dict(LINKED_FOOTAGE, source_verification_status="pending"))
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is False
+    assert any("not verified" in reason for reason in gate["reasons"])
+
+
+def test_render_gate_blocks_when_no_campaign_footage_record_exists(monkeypatch):
+    _gate_db(monkeypatch, footage=None)
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is False
+    assert "campaign_link:no_campaign_source_record" in gate["reasons"]
+
+
+def test_expired_rights_still_block_render_despite_approved_campaign(monkeypatch):
+    _gate_db(monkeypatch, permission=dict(AUTHORIZED_PERMISSION, rights_status=RightsStatus.EXPIRED))
+    gate = media_pipeline.render_gate(dict(VALIDATED_ITEM), dict(PRODUCTION_SOURCE))
+    assert gate["allowed"] is False
+    assert any(reason.startswith("rights_gate:") for reason in gate["reasons"])
+
+
+def test_footage_longer_than_sync_limit_is_queued_not_blocked(monkeypatch):
+    from app.queue import job_queue
+
+    item = dict(VALIDATED_ITEM, media_probe={"duration_seconds": moment_detection.MAX_ANALYSIS_SECONDS + 60})
+    db = FakeDB(item)
+    monkeypatch.setattr(media_pipeline, "db", db)
+    monkeypatch.setattr(media_pipeline, "rights_manager", FakePermissions(AUTHORIZED_PERMISSION))
+    calls = []
+    monkeypatch.setattr(job_queue, "enqueue_job", lambda func, job_id, *args, **kw: calls.append((func, job_id, args, kw)) or True)
+
+    result = media_pipeline.analyze_item(item["id"])
+
+    assert result["analysis_status"] == "queued"
+    func, job_id, args, kw = calls[0]
+    assert func is media_pipeline.run_analysis_job
+    assert args == (item["id"],)
+    assert kw["timeout"] == media_pipeline.BACKGROUND_JOB_TIMEOUT_SECONDS
+    assert job_id.startswith("discovery-analysis-")
+    assert db.items[item["id"]]["analysis_status"] == "queued"
+
+
+@pytest.mark.parametrize("enqueue", [lambda *a, **k: False, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("redis down"))])
+def test_unavailable_queue_fails_visibly_instead_of_silently_dropping(monkeypatch, enqueue):
+    from app.queue import job_queue
+
+    item = dict(VALIDATED_ITEM, media_probe={"duration_seconds": moment_detection.MAX_ANALYSIS_SECONDS + 60})
+    db = FakeDB(item)
+    monkeypatch.setattr(media_pipeline, "db", db)
+    monkeypatch.setattr(media_pipeline, "rights_manager", FakePermissions(AUTHORIZED_PERMISSION))
+    monkeypatch.setattr(job_queue, "enqueue_job", enqueue)
+
+    result = media_pipeline.analyze_item(item["id"])
+
+    assert result["analysis_status"] == "failed"
+    assert result["analysis_reason"] == "queue_unavailable"
+    assert db.items[item["id"]]["analysis_reason"] == "queue_unavailable"
+
+
+def test_background_worker_analyzes_long_footage_with_background_limit(monkeypatch):
+    item = dict(VALIDATED_ITEM, media_probe={"duration_seconds": 1500.0})
+    db = FakeDB(item)
+    monkeypatch.setattr(media_pipeline, "db", db)
+    monkeypatch.setattr(media_pipeline, "rights_manager", FakePermissions(AUTHORIZED_PERMISSION))
+    seen = {}
+
+    def fake_analyze(path, **kwargs):
+        seen.update(kwargs)
+        return {"signals": {}, "candidates": [], "qualifying": []}
+
+    monkeypatch.setattr(media_pipeline, "analyze_footage", fake_analyze)
+    monkeypatch.setattr(media_pipeline.os.path, "isfile", lambda path: True)
+
+    result = media_pipeline.run_analysis_job("job_1", item["id"])
+
+    assert result["analysis_status"] == "completed"
+    assert seen["max_seconds"] == moment_detection.MAX_BACKGROUND_SECONDS
+    assert seen["duration"] == 1500.0
+    assert db.items[item["id"]]["analysis_status"] == "completed"

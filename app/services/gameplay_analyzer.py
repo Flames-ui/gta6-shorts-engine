@@ -166,7 +166,7 @@ class GameplayAnalyzerService:
         return motion_timeline
 
     @staticmethod
-    def detect_audio_energy_peaks(video_path: str) -> List[Dict[str, float]]:
+    def detect_audio_energy_peaks(video_path: str, timeout: int = 60) -> List[Dict[str, float]]:
         """
         Extract audio volume and loudness envelope via FFmpeg astats or volumedetect filter.
         Identifies loud moments (shouts, gunfire, sirens, collisions).
@@ -178,7 +178,7 @@ class GameplayAnalyzerService:
             "-f", "null", "-",
         ]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             lines = res.stderr.splitlines()
             peaks: List[Dict[str, float]] = []
             curr_pts = 0.0
