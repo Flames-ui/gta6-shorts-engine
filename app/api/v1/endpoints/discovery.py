@@ -21,47 +21,108 @@ logger = logging.getLogger("gta6_shorts.discovery")
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
 
 
+def _as_uuid(value) -> Optional[str]:
+    """Return value as a canonical UUID string, or None when it is not one."""
+    try:
+        return str(uuid.UUID(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_existing_source(payload: SourceCreateRequest, owner_id: Optional[str]) -> Optional[dict]:
+    """Return the owner's source already registered for the same feed or channel, if any."""
+    locators = [
+        (field, value.strip())
+        for field, value in (("feed_url", payload.feed_url), ("channel_url", payload.channel_url))
+        if value and value.strip()
+    ]
+    if not locators:
+        return None
+    for candidate in db.list_sources(user_id=owner_id, category_id="gta6", active_only=False):
+        if candidate.get("user_id") != owner_id or candidate.get("source_type") != payload.source_type:
+            continue
+        if any((candidate.get(field) or "").strip() == value for field, value in locators):
+            return candidate
+    return None
+
+
 @router.post("/sources", status_code=status.HTTP_201_CREATED)
 async def register_content_source(
     payload: SourceCreateRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Register a new content source (RSS feed, creator submission portal, or authorized direct upload)."""
-    source_id = f"src_{uuid.uuid4().hex[:10]}"
-    source_record = {
-        "id": source_id,
-        "user_id": auth.user_id if auth.user_id != "system_admin" else None,
-        "source_type": payload.source_type,
-        "name": payload.name,
-        "feed_url": payload.feed_url,
-        "channel_url": payload.channel_url,
-        "category_id": "gta6",
-        "is_active": bool(auth.is_admin and payload.rights_status in (RightsStatus.AUTHORIZED_EDITING.value, RightsStatus.AUTHORIZED_PLATFORMS.value)),
-        "auto_clip_enabled": False,
-    }
+    """Register a content source (RSS feed, creator submission portal, or authorized direct upload).
 
-    # Persist source record in database
-    created_source = db.create_source(source_record)
+    Fail-closed rules:
+    - A source is created inactive and is activated only after its rights permission has been
+      written, and only when an administrator records an authorized status.
+    - A non-admin cannot self-certify rights; their registration stays pending_verification.
+    - Registering the same feed or channel again reuses the existing source and its permission.
+      A non-admin repeat never overwrites a permission that is already recorded.
+    - If the permission write fails, the source stays inactive and the caller receives 503.
+    """
+    is_admin = bool(auth.is_admin)
+    owner_id = auth.user_id if auth.user_id != "system_admin" else None
+    requested_status = RightsStatus(payload.rights_status) if is_admin else RightsStatus.PENDING_VERIFICATION
 
-    # Register and persist initial permissions
-    # A source owner cannot self-certify reuse rights. Only an administrator may
-    # record verified permission; all other registrations remain disabled and pending.
-    rights_manager.set_permission(
-        source_id=source_id,
-        status=RightsStatus(payload.rights_status) if auth.is_admin else RightsStatus.PENDING_VERIFICATION,
-        allowed_platforms=payload.allowed_platforms if auth.is_admin else [],
-        license_type=payload.license_type if auth.is_admin else None,
-        verified_by=auth.user_id if auth.is_admin else None,
+    existing = _find_existing_source(payload, owner_id)
+    if existing is not None:
+        source = existing
+        source_id = existing["id"]
+        result_status = "exists"
+    else:
+        source_id = f"src_{uuid.uuid4().hex[:10]}"
+        source = db.create_source({
+            "id": source_id,
+            "user_id": owner_id,
+            "source_type": payload.source_type,
+            "name": payload.name,
+            "feed_url": payload.feed_url,
+            "channel_url": payload.channel_url,
+            "category_id": "gta6",
+            "is_active": False,  # activated only after rights are durably recorded below
+            "auto_clip_enabled": False,
+        })
+        result_status = "created"
+
+    preserve_existing_permission = (
+        result_status == "exists"
+        and not is_admin
+        and rights_manager.get_permission(source_id) is not None
     )
+    if not preserve_existing_permission:
+        try:
+            rights_manager.set_permission(
+                source_id=source_id,
+                status=requested_status,
+                allowed_platforms=payload.allowed_platforms if is_admin else [],
+                license_type=payload.license_type if is_admin else None,
+                # verified_by is a UUID reference to auth.users. API-key administrators ("system_admin")
+                # have no UUID, so they are recorded in the audit log instead of this column.
+                verified_by=_as_uuid(auth.user_id) if is_admin else None,
+            )
+        except Exception:
+            logger.exception("Rights permission not recorded for source %s; source stays inactive", source_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Rights could not be recorded, so the source is not active. Retry registration.",
+            )
+
+        should_activate = is_admin and requested_status in (
+            RightsStatus.AUTHORIZED_EDITING,
+            RightsStatus.AUTHORIZED_PLATFORMS,
+        )
+        if bool(source.get("is_active")) != should_activate:
+            source = db.update_source(source_id, {"is_active": should_activate}) or {**source, "is_active": should_activate}
 
     db.create_audit_log(
-        action="source_registered",
+        action="source_registered" if result_status == "created" else "source_reregistered",
         resource_type="source",
         user_id=auth.user_id,
         resource_id=source_id,
-        details={"name": payload.name, "source_type": payload.source_type, "category_id": payload.category_id},
+        details={"name": payload.name, "source_type": payload.source_type, "category_id": "gta6"},
     )
-    return {"status": "created", "source": created_source}
+    return {"status": result_status, "source": source}
 
 
 @router.get("/sources")

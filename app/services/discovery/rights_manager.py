@@ -41,8 +41,9 @@ class RightsManager:
         expires_str = expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at
         revoked_str = revoked_at.isoformat() if isinstance(revoked_at, datetime) else revoked_at
 
+        # No "id" here: source_permissions.id is a UUID primary key with DEFAULT gen_random_uuid().
+        # The database keeps the existing id on conflict (source_id), so re-saving never changes it.
         record_data = {
-            "id": f"perm_{source_id}",
             "source_id": source_id,
             "rights_status": status_val,
             "license_type": license_type,

@@ -980,43 +980,65 @@ class DatabaseClient:
     # Source Permissions CRUD
     # -------------------------------------------------------------------------
     def set_source_permission(self, source_id: str, permission_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Insert or update the single permission row for a source (one row per source_id).
+
+        The id column is a UUID. It is never taken from the caller: Supabase assigns it with
+        gen_random_uuid(), and SQLite assigns a uuid4 on first insert. A conflicting write keeps the
+        existing id and created_at, so existing permission records are updated, never duplicated.
+        """
         now_iso = datetime.now(timezone.utc).isoformat()
-        permission_data["source_id"] = source_id
-        permission_data["updated_at"] = now_iso
+        payload = {key: value for key, value in permission_data.items() if key != "id"}
+        payload["source_id"] = source_id
+        payload["updated_at"] = now_iso
 
         if self.has_supabase:
-            res = self.client.table("source_permissions").upsert(permission_data, on_conflict="source_id").execute()
-            return res.data[0] if res.data else permission_data
+            res = self.client.table("source_permissions").upsert(payload, on_conflict="source_id").execute()
+            return res.data[0] if res.data else payload
 
+        allowed_platforms = payload.get("allowed_platforms", ["tiktok", "youtube_shorts"])
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO source_permissions
+                INSERT INTO source_permissions
                 (id, source_id, rights_status, license_type, allowed_platforms, expires_at,
                  attribution_requirements, verification_notes, verified_by, original_creator,
                  source_url, permission_evidence, derivative_rights_allowed, revoked_at, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    rights_status = excluded.rights_status,
+                    license_type = excluded.license_type,
+                    allowed_platforms = excluded.allowed_platforms,
+                    expires_at = excluded.expires_at,
+                    attribution_requirements = excluded.attribution_requirements,
+                    verification_notes = excluded.verification_notes,
+                    verified_by = excluded.verified_by,
+                    original_creator = excluded.original_creator,
+                    source_url = excluded.source_url,
+                    permission_evidence = excluded.permission_evidence,
+                    derivative_rights_allowed = excluded.derivative_rights_allowed,
+                    revoked_at = excluded.revoked_at,
+                    updated_at = excluded.updated_at
                 """,
                 (
-                    permission_data.get("id", f"perm_{source_id}"),
+                    str(uuid.uuid4()),
                     source_id,
-                    permission_data.get("rights_status", "pending_verification"),
-                    permission_data.get("license_type"),
-                    json.dumps(permission_data.get("allowed_platforms", ["tiktok", "youtube_shorts"])),
-                    permission_data.get("expires_at"),
-                    permission_data.get("attribution_requirements"),
-                    permission_data.get("verification_notes"),
-                    permission_data.get("verified_by"),
-                    permission_data.get("original_creator"),
-                    permission_data.get("source_url"),
-                    permission_data.get("permission_evidence"),
-                    1 if permission_data.get("derivative_rights_allowed", True) else 0,
-                    permission_data.get("revoked_at"),
-                    permission_data.get("created_at", now_iso),
+                    payload.get("rights_status", "pending_verification"),
+                    payload.get("license_type"),
+                    json.dumps(allowed_platforms),
+                    payload.get("expires_at"),
+                    payload.get("attribution_requirements"),
+                    payload.get("verification_notes"),
+                    payload.get("verified_by"),
+                    payload.get("original_creator"),
+                    payload.get("source_url"),
+                    payload.get("permission_evidence"),
+                    1 if payload.get("derivative_rights_allowed", True) else 0,
+                    payload.get("revoked_at"),
+                    payload.get("created_at", now_iso),
                     now_iso,
                 ),
             )
-        return permission_data
+        return payload
 
     def get_source_permission(self, source_id: str) -> Optional[Dict[str, Any]]:
         if self.has_supabase:
