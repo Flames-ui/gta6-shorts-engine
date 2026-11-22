@@ -534,17 +534,19 @@ class CampaignResponse(BaseModel):
     required_hashtags: List[str] = Field(default_factory=list)
     required_mentions: List[str] = Field(default_factory=list)
     required_captions: Optional[str] = None
-    min_clip_duration_seconds: int = 15
-    max_clip_duration_seconds: int = 60
-    resolution_requirements: str = "1080x1920"
-    aspect_ratio: str = "9:16"
-    reward_model: str = "cpm"
-    payout_amount: float = 0.0
-    cpm: float = 0.0
-    reward_per_view: float = 0.0
+    min_clip_duration_seconds: Optional[int] = None
+    max_clip_duration_seconds: Optional[int] = None
+    resolution_requirements: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    reward_model: Optional[str] = None
+    payout_amount: Optional[float] = None
+    cpm: Optional[float] = None
+    reward_per_view: Optional[float] = None
     view_qualification_rules: Dict[str, Any] = Field(default_factory=dict)
-    max_eligible_views: int = 0
-    max_payout_per_clip: float = 0.0
+    max_eligible_views: Optional[int] = None
+    max_payout_per_clip: Optional[float] = None
+    campaign_budget: Optional[float] = None
+    remaining_budget: Optional[float] = None
     geographic_eligibility: List[str] = Field(default_factory=list)
     account_eligibility: Dict[str, Any] = Field(default_factory=dict)
     source_video_requirements: Optional[str] = None
@@ -591,9 +593,15 @@ class CampaignSourceResponse(BaseModel):
     authorized_platforms: List[str] = Field(default_factory=list)
     permission_expiry: Optional[str] = None
     source_verification_status: str
+    verified_by: Optional[str] = None
+    verified_at: Optional[str] = None
     notes: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+class SourceVerifyRequest(BaseModel):
+    notes: Optional[str] = Field(default=None, description="Operator verification audit notes")
 
 
 class CampaignEligibilityResult(BaseModel):
@@ -636,14 +644,32 @@ class ClipSubmissionResponse(BaseModel):
     submission_evidence: Dict[str, Any]
     status: str
     eligible_views: int
+    estimated_rewards: float = 0.0
     pending_rewards: float
     approved_rewards: float
     rejected_rewards: float
     withdrawable_earnings: float
+    evidence_source: Optional[str] = None
+    evidence_url: Optional[str] = None
+    verified_by: Optional[str] = None
     rejection_reason: Optional[str] = None
     last_verified_at: Optional[str] = None
     operator_notes: Optional[str] = None
     created_at: Optional[str] = None
+
+
+class ClipMetricsUpdateRequest(BaseModel):
+    evidence_source: str = Field(..., description="Verified evidence source (e.g. 'content_rewards_api', 'manual_operator_audit')")
+    evidence_url: Optional[str] = None
+    eligible_views: Optional[int] = Field(default=None, ge=0)
+    estimated_rewards: Optional[float] = Field(default=None, ge=0.0)
+    pending_rewards: Optional[float] = Field(default=None, ge=0.0)
+    approved_rewards: Optional[float] = Field(default=None, ge=0.0)
+    rejected_rewards: Optional[float] = Field(default=None, ge=0.0)
+    withdrawable_earnings: Optional[float] = Field(default=None, ge=0.0)
+    status: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    operator_notes: Optional[str] = None
 
 
 class EarningsSummaryResponse(BaseModel):

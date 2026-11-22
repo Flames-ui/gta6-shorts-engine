@@ -410,10 +410,14 @@ class DatabaseClient:
                     submission_evidence TEXT DEFAULT "{}",
                     status TEXT NOT NULL DEFAULT "submitted",
                     eligible_views INTEGER DEFAULT 0,
+                    estimated_rewards REAL DEFAULT 0.0,
                     pending_rewards REAL DEFAULT 0.0,
                     approved_rewards REAL DEFAULT 0.0,
                     rejected_rewards REAL DEFAULT 0.0,
                     withdrawable_earnings REAL DEFAULT 0.0,
+                    evidence_source TEXT,
+                    evidence_url TEXT,
+                    verified_by TEXT,
                     rejection_reason TEXT,
                     last_verified_at TEXT,
                     operator_notes TEXT,
@@ -2121,8 +2125,9 @@ class DatabaseClient:
                 INSERT OR REPLACE INTO campaign_sources (
                     id, campaign_id, source_url, original_creator, source_type,
                     permission_evidence, allowed_derivative_uses, authorized_platforms,
-                    permission_expiry, source_verification_status, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    permission_expiry, source_verification_status, verified_by, verified_at,
+                    notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 source_data['id'],
                 source_data.get('campaign_id'),
@@ -2130,10 +2135,12 @@ class DatabaseClient:
                 source_data.get('original_creator', 'Unknown'),
                 source_data.get('source_type', 'campaign_provided'),
                 source_data.get('permission_evidence', ''),
-                json.dumps(source_data.get('allowed_derivative_uses') or ['short_form_clipping', 'vertical_reframe', 'burn_captions']),
-                json.dumps(source_data.get('authorized_platforms') or ['tiktok', 'youtube_shorts']),
+                json.dumps(source_data.get('allowed_derivative_uses') or ['short_form_clipping']),
+                json.dumps(source_data.get('authorized_platforms') or ['tiktok']),
                 source_data.get('permission_expiry'),
                 source_data.get('source_verification_status', 'pending_verification'),
+                source_data.get('verified_by'),
+                source_data.get('verified_at'),
                 source_data.get('notes'),
                 source_data.get('created_at', now_iso),
                 source_data.get('updated_at', now_iso),
@@ -2306,9 +2313,10 @@ class DatabaseClient:
                 INSERT OR REPLACE INTO clip_submissions (
                     id, clip_id, campaign_id, platform, submitted_at, submission_url,
                     submission_post_id, submission_evidence, status, eligible_views,
-                    pending_rewards, approved_rewards, rejected_rewards, withdrawable_earnings,
+                    estimated_rewards, pending_rewards, approved_rewards, rejected_rewards,
+                    withdrawable_earnings, evidence_source, evidence_url, verified_by,
                     rejection_reason, last_verified_at, operator_notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 submission_data['id'],
                 submission_data['clip_id'],
@@ -2320,10 +2328,14 @@ class DatabaseClient:
                 json.dumps(submission_data.get('submission_evidence') or {}),
                 submission_data.get('status', 'submitted'),
                 int(submission_data.get('eligible_views') or 0),
+                float(submission_data.get('estimated_rewards') or 0.0),
                 float(submission_data.get('pending_rewards') or 0.0),
                 float(submission_data.get('approved_rewards') or 0.0),
                 float(submission_data.get('rejected_rewards') or 0.0),
                 float(submission_data.get('withdrawable_earnings') or 0.0),
+                submission_data.get('evidence_source', 'operator_submission'),
+                submission_data.get('evidence_url'),
+                submission_data.get('verified_by'),
                 submission_data.get('rejection_reason'),
                 submission_data.get('last_verified_at', now_iso),
                 submission_data.get('operator_notes'),

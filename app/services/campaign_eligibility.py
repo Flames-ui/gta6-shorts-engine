@@ -12,46 +12,51 @@ class CampaignEligibilityService:
     """
     Evaluates campaign eligibility and enforces the production gate:
     No campaign, no clipping. No verified earning opportunity, no production.
+    No operator approval, no clipping.
     """
 
     def evaluate_campaign(self, campaign: Dict[str, Any]) -> Tuple[str, List[str], Dict[str, bool]]:
         """
         Evaluate campaign attributes against strict qualification criteria.
+        Fails closed on unknown or missing critical information.
         Returns (new_status, reasons, checks_dict).
         """
         checks = {
             "has_supported_platform": False,
             "is_gaming_category": False,
-            "has_reward_model": False,
+            "has_positive_reward": False,
+            "rules_unambiguous": True,
             "not_expired": True,
             "not_exhausted": True,
-            "rules_unambiguous": True,
+            "duration_bounds_known": False,
+            "submission_method_known": False,
+            "source_requirements_known": False,
         }
         reasons = []
 
         # 1. Platform Check (TikTok and YouTube Shorts only)
-        platforms = [p.lower() for p in (campaign.get("accepted_platforms") or [])]
+        platforms = [str(p).lower() for p in (campaign.get("accepted_platforms") or [])]
         if any(p in ["tiktok", "youtube_shorts"] for p in platforms):
             checks["has_supported_platform"] = True
         else:
-            reasons.append("Campaign does not accept supported platforms (TikTok or YouTube Shorts).")
+            reasons.append("Campaign does not explicitly accept supported platforms (TikTok or YouTube Shorts).")
 
         # 2. Content & Gaming Category Check
-        games = [g.lower() for g in (campaign.get("eligible_games") or [])]
-        categories = [c.lower() for c in (campaign.get("content_categories") or [])]
+        games = [str(g).lower() for g in (campaign.get("eligible_games") or [])]
+        categories = [str(c).lower() for c in (campaign.get("content_categories") or [])]
         if any("gta" in g or "gaming" in g or "game" in g or "cod" in g or "duty" in g for g in games) or "gaming" in categories:
             checks["is_gaming_category"] = True
         else:
             reasons.append("Campaign is not associated with GTA 6 or an eligible gaming category.")
 
-        # 3. Reward Model Check
-        reward_model = campaign.get("reward_model") or "cpm"
+        # 3. Reward Model & Positive Earning Structure Check
+        reward_model = str(campaign.get("reward_model") or "").lower()
         cpm = float(campaign.get("cpm") or 0.0)
         payout = float(campaign.get("payout_amount") or 0.0)
         if reward_model in ["cpm", "prize_pool", "fixed_per_clip", "bounty"] and (cpm > 0 or payout > 0):
-            checks["has_reward_model"] = True
+            checks["has_positive_reward"] = True
         else:
-            reasons.append("Campaign lacks a verified, positive earning structure (CPM or Prize Pool).")
+            reasons.append("Campaign lacks a verified, positive earning structure (unknown reward model or zero payout).")
 
         # 4. Deadline / Expiration Check
         now = datetime.now(timezone.utc)
@@ -66,10 +71,14 @@ class CampaignEligibilityService:
                 pass
 
         # 5. Budget / Exhaustion Check
-        max_views = int(campaign.get("max_eligible_views") or 0)
-        if campaign.get("status") == CampaignStatus.EXHAUSTED.value:
+        status_val = str(campaign.get("status") or "").lower()
+        if status_val == CampaignStatus.EXHAUSTED.value:
             checks["not_exhausted"] = False
             reasons.append("Campaign budget is exhausted.")
+        remaining_budget = campaign.get("remaining_budget")
+        if remaining_budget is not None and float(remaining_budget) <= 0.0:
+            checks["not_exhausted"] = False
+            reasons.append("Campaign remaining budget is zero or negative.")
 
         # 6. Ambiguities & Review Check
         ambiguities = campaign.get("ambiguities") or []
@@ -78,6 +87,29 @@ class CampaignEligibilityService:
             for amb in ambiguities:
                 reasons.append(f"Rule ambiguity: {amb}")
 
+        # 7. Duration Bounds Check
+        min_dur = campaign.get("min_clip_duration_seconds")
+        max_dur = campaign.get("max_clip_duration_seconds")
+        if min_dur is not None and max_dur is not None and int(min_dur) > 0 and int(max_dur) >= int(min_dur):
+            checks["duration_bounds_known"] = True
+        else:
+            reasons.append("Clip duration limits are unknown or invalid.")
+
+        # 8. Submission Method Check
+        sub_inst = campaign.get("submission_instructions") or campaign.get("submission_method")
+        raw_rules = str(campaign.get("raw_rules") or "").lower()
+        if (sub_inst and str(sub_inst).strip()) or "submit" in raw_rules or "upload" in raw_rules:
+            checks["submission_method_known"] = True
+        else:
+            reasons.append("Campaign submission method and instructions are unknown.")
+
+        # 9. Source Requirements Check
+        src_req = campaign.get("source_video_requirements")
+        if (src_req and str(src_req).strip()) or "footage" in raw_rules or "source" in raw_rules or "stream" in raw_rules or "vod" in raw_rules:
+            checks["source_requirements_known"] = True
+        else:
+            reasons.append("Source video requirements and allowed footage guidelines are unknown.")
+
         # Compute Final Status
         if not checks["not_expired"]:
             final_status = CampaignStatus.EXPIRED.value
@@ -85,7 +117,13 @@ class CampaignEligibilityService:
             final_status = CampaignStatus.EXHAUSTED.value
         elif not checks["has_supported_platform"] or not checks["is_gaming_category"]:
             final_status = CampaignStatus.REJECTED.value
-        elif not checks["has_reward_model"] or not checks["rules_unambiguous"]:
+        elif (
+            not checks["has_positive_reward"]
+            or not checks["rules_unambiguous"]
+            or not checks["duration_bounds_known"]
+            or not checks["submission_method_known"]
+            or not checks["source_requirements_known"]
+        ):
             final_status = CampaignStatus.NEEDS_REVIEW.value
         else:
             if campaign.get("operator_approved"):
@@ -104,11 +142,12 @@ class CampaignEligibilityService:
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Enforce the central production gate before clipping starts.
-        Rejects job if campaign is not active, platform is not accepted,
+        Rejects job if campaign is not active and operator-approved, platform is not accepted,
         or source footage lacks verified permissions.
         """
         details = {
             "campaign_active": False,
+            "operator_approved": False,
             "platform_accepted": False,
             "source_associated": False,
             "source_verified": False,
@@ -116,19 +155,30 @@ class CampaignEligibilityService:
             "derivative_use_permitted": False,
             "source_not_expired": True,
             "duration_compliant": True,
+            "allowance_available": True,
         }
 
         if not campaign:
             return False, "Gate Rejected: No valid campaign associated with clipping request.", details
 
-        # 1. Campaign Active Check
+        # 1. Campaign Active & Operator Approval Check
         campaign_status = str(campaign.get("status") or "").lower()
         if campaign_status == CampaignStatus.EXPIRED.value:
-            return False, "Gate Rejected: Campaign status is 'expired'. Production requires an eligible or approved campaign.", details
-        campaign_status = campaign.get("status")
-        if campaign_status not in [CampaignStatus.APPROVED.value, CampaignStatus.ELIGIBLE.value]:
-            return False, f"Gate Rejected: Campaign status is '{campaign_status}'. Production requires an eligible or approved campaign.", details
+            return False, "Gate Rejected: Campaign status is 'expired'. Production requires an approved campaign.", details
+        if campaign_status == CampaignStatus.EXHAUSTED.value:
+            return False, "Gate Rejected: Campaign status is 'exhausted'. Production requires an active campaign with remaining allowance.", details
+
+        # Production strictly requires approved status AND operator_approved flag
+        if campaign_status != CampaignStatus.APPROVED.value or not campaign.get("operator_approved"):
+            return False, f"Gate Rejected: Campaign status is '{campaign_status}' (operator_approved={campaign.get('operator_approved')}). Production requires explicit operator approval before clipping.", details
         details["campaign_active"] = True
+        details["operator_approved"] = True
+
+        # Check budget allowance if set
+        remaining_budget = campaign.get("remaining_budget")
+        if remaining_budget is not None and float(remaining_budget) <= 0.0:
+            details["allowance_available"] = False
+            return False, "Gate Rejected: Campaign remaining budget is exhausted ($0.00).", details
 
         # 2. Target Platform Accepted
         accepted_platforms = [p.lower() for p in (campaign.get("accepted_platforms") or [])]
@@ -148,7 +198,7 @@ class CampaignEligibilityService:
         # Verify source rights status
         verification_status = source.get("source_verification_status")
         if verification_status != "verified":
-            return False, f"Gate Rejected: Source footage permission is not verified (status: '{verification_status}').", details
+            return False, f"Gate Rejected: Source footage permission is not verified (status: '{verification_status}'). Operator verification is required.", details
         details["source_verified"] = True
 
         # Verify target platform is authorized on source
@@ -183,7 +233,7 @@ class CampaignEligibilityService:
                 details["duration_compliant"] = False
                 return False, f"Gate Rejected: Planned duration ({planned_duration:.1f}s) outside campaign range [{min_dur}s, {max_dur}s].", details
 
-        return True, "Gate Approved: Campaign is active and source footage is authorized for production.", details
+        return True, "Gate Approved: Campaign is approved by operator and source footage is authorized for production.", details
 
 
 campaign_eligibility_service = CampaignEligibilityService()

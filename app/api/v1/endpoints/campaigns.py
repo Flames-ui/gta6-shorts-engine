@@ -18,12 +18,14 @@ from ....schemas import (
     CampaignSourceResponse,
     CampaignStatus,
     ClipComplianceResult,
+    ClipMetricsUpdateRequest,
     ClipSubmissionRequest,
     ClipSubmissionResponse,
     EarningsSummaryResponse,
     JobCreateRequest,
     JobResponse,
     JobStatus,
+    SourceVerifyRequest,
 )
 from ....services.campaign_eligibility import campaign_eligibility_service
 from ....services.campaign_rule_reader import campaign_rule_reader
@@ -43,8 +45,19 @@ async def discover_campaigns(
     limit: int = Query(20, ge=1, le=50),
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Discover active gaming clipping campaigns from Content Rewards marketplace."""
+    """
+    Discover active gaming clipping campaigns from Content Rewards marketplace.
+    When browser session is not yet authenticated, returns empty list (no fabricated data).
+    """
     return content_rewards_adapter.discover_campaigns(limit=limit)
+
+
+@router.get("/discover/status", response_model=Dict[str, Any])
+async def get_discovery_status(
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Retrieve discovery integration and browser operator session status."""
+    return content_rewards_adapter.get_discovery_status()
 
 
 @router.post("/import", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED)
@@ -52,7 +65,10 @@ async def import_campaign(
     payload: CampaignImportRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Import a campaign from marketplace URL or operator-provided raw rules."""
+    """
+    Import a campaign from marketplace URL or operator-provided raw rules.
+    Fails closed if rules cannot be acquired. Never invents missing requirements.
+    """
     raw_rules = payload.raw_rules
     meta = {}
     if not raw_rules:
@@ -63,7 +79,10 @@ async def import_campaign(
     if not raw_rules or not raw_rules.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unable to acquire rules for campaign. Provide raw_rules explicitly in request.",
+            detail=(
+                "Unable to acquire live rules automatically from Content Rewards (session unauthenticated). "
+                "Please provide raw_rules text in the request payload."
+            ),
         )
 
     imported = content_rewards_adapter.manual_import(
@@ -92,7 +111,7 @@ async def create_campaign(
     campaign_data = payload.model_dump()
     campaign_data["id"] = campaign_id
 
-    # Run rule reader to verify consistency
+    # Run rule reader to verify consistency and detect ambiguities
     analysis = campaign_rule_reader.analyze_rules(
         raw_rules=payload.raw_rules,
         campaign_title=payload.name,
@@ -100,7 +119,7 @@ async def create_campaign(
     )
     campaign_data["ambiguities"] = analysis.ambiguities
 
-    # Run eligibility check
+    # Run strict eligibility check
     new_status, reasons, _ = campaign_eligibility_service.evaluate_campaign(campaign_data)
     campaign_data["status"] = new_status
     if reasons:
@@ -205,7 +224,11 @@ async def review_campaign(
     payload: CampaignReviewRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Operator approval or rejection of a campaign with logged reason."""
+    """
+    Operator approval or rejection of a campaign.
+    Strict Safety Check: An approval attempt fails closed if ANY critical requirement is
+    missing, ambiguous, expired, or non-gaming.
+    """
     campaign = db.get_campaign(campaign_id)
     if not campaign:
         raise HTTPException(
@@ -221,12 +244,18 @@ async def review_campaign(
         )
 
     if decision == "approve":
-        # Run eligibility check to ensure requirements are met before approval
+        # Comprehensive eligibility check
         new_status, reasons, checks = campaign_eligibility_service.evaluate_campaign(campaign)
-        if not checks["has_supported_platform"] or not checks["is_gaming_category"]:
+        failed_checks = [k for k, v in checks.items() if not v]
+        if failed_checks or new_status in [
+            CampaignStatus.REJECTED.value,
+            CampaignStatus.NEEDS_REVIEW.value,
+            CampaignStatus.EXPIRED.value,
+            CampaignStatus.EXHAUSTED.value,
+        ]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot approve ineligible campaign: {'; '.join(reasons)}",
+                detail=f"Cannot approve ineligible or incomplete campaign. Failed checks: {', '.join(failed_checks)}. Reasons: {'; '.join(reasons)}",
             )
         updates = {
             "status": CampaignStatus.APPROVED.value,
@@ -252,7 +281,10 @@ async def add_campaign_source(
     payload: CampaignSourceRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
-    """Register verified source footage authorizing short-form clipping for this campaign."""
+    """
+    Register source footage authorizing short-form clipping for this campaign.
+    All sources begin as 'pending_verification'. Requires operator verification.
+    """
     campaign = db.get_campaign(campaign_id)
     if not campaign:
         raise HTTPException(
@@ -270,9 +302,39 @@ async def add_campaign_source(
         authorized_platforms=payload.authorized_platforms,
         permission_expiry=payload.permission_expiry,
         notes=payload.notes,
-        auto_verify=payload.source_type in ["campaign_provided", "official_trailer"],
     )
     return source
+
+
+@router.post("/{campaign_id}/sources/{source_id}/verify", response_model=CampaignSourceResponse)
+async def verify_campaign_source(
+    campaign_id: str,
+    source_id: str,
+    payload: SourceVerifyRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Explicit operator verification of source footage rights.
+    Validates non-vague evidence, platform authorization, and expiry.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Campaign {campaign_id} not found",
+        )
+
+    ok, reason, updated = source_authorization_service.operator_verify_source(
+        source_id=source_id,
+        verified_by=auth.user_id,
+        notes=payload.notes,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=reason,
+        )
+    return updated
 
 
 @router.get("/{campaign_id}/sources", response_model=List[CampaignSourceResponse])
@@ -292,7 +354,7 @@ async def create_campaign_clipping_job(
 ):
     """
     Enforce strict campaign eligibility gate and enqueue clipping job.
-    Rejects job if campaign is not active or source footage is unauthorized.
+    Rejects job if campaign is not active and approved, or if source footage is unauthorized.
     """
     campaign = db.get_campaign(campaign_id)
     if not campaign:
@@ -413,6 +475,40 @@ async def record_clip_submission(
         operator_notes=payload.operator_notes,
     )
     return submission
+
+
+@router.patch("/submissions/{submission_id}/metrics", response_model=ClipSubmissionResponse)
+async def update_submission_metrics(
+    submission_id: str,
+    payload: ClipMetricsUpdateRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Update verified submission metrics with required evidence source and auditor identifier.
+    Prevents negative or inconsistent financial values.
+    """
+    try:
+        updated = earnings_tracker.update_metrics(
+            submission_id=submission_id,
+            evidence_source=payload.evidence_source,
+            verified_by=auth.user_id,
+            eligible_views=payload.eligible_views,
+            estimated_rewards=payload.estimated_rewards,
+            pending_rewards=payload.pending_rewards,
+            approved_rewards=payload.approved_rewards,
+            rejected_rewards=payload.rejected_rewards,
+            withdrawable_earnings=payload.withdrawable_earnings,
+            evidence_url=payload.evidence_url,
+            status=payload.status,
+            rejection_reason=payload.rejection_reason,
+            operator_notes=payload.operator_notes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Submission {submission_id} not found")
+    return updated
 
 
 @router.get("/earnings/summary", response_model=EarningsSummaryResponse)
