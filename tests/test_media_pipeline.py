@@ -66,6 +66,13 @@ AUTHORIZED_PERMISSION = {
 }
 
 
+@pytest.fixture(autouse=True)
+def semantic_provider_available(monkeypatch):
+    """These pipeline tests exercise analysis flow, not the model. A provider that returns no evidence keeps
+    every window rejected, as it does without evidence. test_semantic_moments.py covers the provider itself."""
+    monkeypatch.setattr(media_pipeline, "default_semantic_fn", lambda: (lambda *args: {"analysis_evidence": {}}))
+
+
 class FakeDB:
     def __init__(self, item=None, source=PRODUCTION_SOURCE, campaign_source=None, campaign=None):
         self.items = {item["id"]: dict(item)} if item else {}
