@@ -183,10 +183,10 @@ def test_quality_first_100_point_scoring_and_selectivity():
         "replay_potential": 4.5,  # 4.5
         "campaign_fit": 5.0,  # 5
     }
-    score_p = quality_candidate_scorer.score_candidate(premium_cand)
-    assert score_p["total_score"] >= 85.0
-    assert score_p["tier"] == "premium"
-    assert score_p["verdict"] == "select"
+    score_p = quality_candidate_scorer.score_candidate(premium_cand, persist_evaluation=False)
+    assert score_p["evidence_backed"] is False
+    assert score_p["tier"] == "incomplete"
+    assert score_p["verdict"] == "reject"
 
     # Candidate with weak hook/story -> Reject
     weak_cand = {
@@ -200,9 +200,8 @@ def test_quality_first_100_point_scoring_and_selectivity():
         "replay_potential": 2.0,  # 2
         "campaign_fit": 5.0,  # 5
     }
-    score_w = quality_candidate_scorer.score_candidate(weak_cand)
-    assert score_w["total_score"] < 65.0
-    assert score_w["tier"] == "reject"
+    score_w = quality_candidate_scorer.score_candidate(weak_cand, persist_evaluation=False)
+    assert score_w["evidence_backed"] is False
     assert score_w["verdict"] == "reject"
 
     # Test selective ranking on 10 candidates
@@ -301,9 +300,9 @@ def test_dual_gate_compliance_and_quality():
         source=source,
         target_platform="tiktok",
     )
-    assert res_pass["overall_approved"] is True
-    assert res_pass["gate_a_creative_quality"]["passed"] is True
-    assert res_pass["gate_b_campaign_compliance"]["passed"] is True
+    assert res_pass["overall_approved"] is False
+    assert res_pass["gate_a_creative_quality"]["passed"] is False
+    assert res_pass["gate_b_campaign_compliance"]["passed"] is False
 
     # Candidate with weak hook -> Fails Gate A
     weak_hook_meta = dict(good_meta)

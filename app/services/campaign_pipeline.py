@@ -49,15 +49,21 @@ class CampaignPipelineOrchestrator:
     def run_pipeline_for_campaign(
         self,
         campaign_id: str,
-        source_id: str,
-        source_video_path: str,
+        source_id: Optional[str] = None,
+        source_video_path: Optional[str] = None,
         target_platform: str = "tiktok",
         operator_override: bool = False,
         daily_target_max: int = 5,
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Executes the single unified workflow end-to-end.
+        Fails closed on missing or unverified preconditions.
+        No programmatic bypasses or operator overrides are permitted.
         """
+        if operator_override:
+            logger.warning("operator_override parameter is strictly prohibited and ignored in Milestone 3.1. Verification must be evidence-backed.")
+
         now_iso = datetime.now(timezone.utc).isoformat()
         pipeline_log = {
             "run_id": f"pipe_{uuid.uuid4().hex[:10]}",
@@ -75,13 +81,16 @@ class CampaignPipelineOrchestrator:
         # STAGE 1: Campaign Rule Extraction
         # ---------------------------------------------------------------------
         campaign = db.get_campaign(campaign_id)
+        if campaign and not source_id:
+            source_id = campaign.get("source_id")
+        if campaign and not source_video_path:
+            source_video_path = campaign.get("source_file_path")
         if not campaign:
             err = f"Stage 1 Blocker: Campaign {campaign_id} not found."
             pipeline_log["blockers"].append(err)
             pipeline_log["status"] = "failed"
             return pipeline_log
 
-        # Extract rules if raw description present
         raw_desc = campaign.get("description") or ""
         extracted_rules = self.rule_reader.analyze_rules(raw_rules=raw_desc, campaign_title=campaign.get("name"))
         pipeline_log["stages_completed"].append("stage_1_rule_extraction")
@@ -89,9 +98,8 @@ class CampaignPipelineOrchestrator:
         # ---------------------------------------------------------------------
         # STAGE 2: Strict Campaign Eligibility Verification
         # ---------------------------------------------------------------------
-        # GTA 6 and gaming only, TikTok and YouTube Shorts offers only
         status, reasons, checks = self.eligibility_service.evaluate_campaign(campaign)
-        if status not in ("eligible", "approved") and not operator_override:
+        if status not in ("eligible", "approved"):
             blocker = f"Stage 2 Blocker: Campaign {campaign_id} is ineligible ({status}): {reasons}"
             pipeline_log["blockers"].append(blocker)
             pipeline_log["status"] = "ineligible"
@@ -111,7 +119,7 @@ class CampaignPipelineOrchestrator:
         # ---------------------------------------------------------------------
         # STAGE 4: Operator Approval Verification
         # ---------------------------------------------------------------------
-        is_approved = bool(campaign.get("operator_approved")) or operator_override
+        is_approved = bool(campaign.get("operator_approved"))
         if not is_approved:
             blocker = f"Stage 4 Blocker: Campaign {campaign_id} requires explicit operator approval before production."
             pipeline_log["blockers"].append(blocker)
@@ -131,19 +139,17 @@ class CampaignPipelineOrchestrator:
         # STAGE 5: Source Footage Authorization Verification
         # ---------------------------------------------------------------------
         source_record = db.get_campaign_source(source_id)
-        if not source_record and not operator_override:
+        if not source_record:
             blocker = f"Stage 5 Blocker: Source footage {source_id} record not found."
             pipeline_log["blockers"].append(blocker)
             pipeline_log["status"] = "unauthorized_source"
             return pipeline_log
 
-        is_source_verified = (
-            operator_override or
-            (source_record and source_record.get("source_verification_status") in ("verified", "authorized"))
+        authorized, authorization_reason, source_record = self.source_service.verify_source(
+            source_id=str(source_id), campaign_id=str(campaign_id), target_platform=target_platform
         )
-        if not is_source_verified:
-            blocker = f"Stage 5 Blocker: Source footage {source_id} lacks verified reuse permissions."
-            pipeline_log["blockers"].append(blocker)
+        if not authorized:
+            pipeline_log["blockers"].append(f"Stage 5 Blocker: {authorization_reason}")
             pipeline_log["status"] = "source_not_verified"
             return pipeline_log
 
@@ -161,7 +167,7 @@ class CampaignPipelineOrchestrator:
             required_asset_types=req_assets,
             require_verified_permission=True,
         )
-        if not assets_ok and not operator_override:
+        if not assets_ok:
             blocker = f"Stage 6 Blocker: Required assets missing or unverified: {missing_assets}"
             pipeline_log["blockers"].append(blocker)
             pipeline_log["status"] = "missing_campaign_assets"
@@ -173,8 +179,8 @@ class CampaignPipelineOrchestrator:
         # ---------------------------------------------------------------------
         # STAGE 7: Moment Analysis from Authorized Footage
         # ---------------------------------------------------------------------
-        if not os.path.exists(source_video_path):
-            blocker = f"Stage 7 Blocker: Source video file missing on disk: {source_video_path}"
+        if not source_video_path or not os.path.isfile(source_video_path):
+            blocker = f"Stage 7 Blocker: Source video file missing on disk: {source_video_path or 'not provided'}"
             pipeline_log["blockers"].append(blocker)
             pipeline_log["status"] = "missing_video_file"
             return pipeline_log
@@ -219,6 +225,20 @@ class CampaignPipelineOrchestrator:
             cand_id = cand.get("candidate_id")
             clip_id = f"clip_{campaign_id[:8]}_{cand_id[:8]}_{idx}"
 
+            # Idempotency check: Reuse existing clip if already rendered and compliant
+            existing_clip = db.get_clip(clip_id)
+            if existing_clip and existing_clip.get("is_compliant") and existing_clip.get("video_path") and os.path.exists(existing_clip.get("video_path")):
+                logger.info("Reusing idempotent rendered clip %s", clip_id)
+                pipeline_log["produced_clips"].append({
+                    "clip_id": clip_id,
+                    "video_path": existing_clip.get("video_path"),
+                    "quality_score": cand.get("quality_score"),
+                    "gate_a_passed": True,
+                    "gate_b_passed": True,
+                    "idempotent_reused": True,
+                })
+                continue
+
             # Stage 9: Build structured editing plan
             plan = self.editing_planner.create_editing_plan(
                 campaign=campaign,
@@ -242,10 +262,11 @@ class CampaignPipelineOrchestrator:
                 clip_id=clip_id,
                 video_path=rendered_video_path,
                 campaign=campaign,
-                source=source_record or {"source_verification_status": "verified", "authorized_platforms": ["tiktok", "youtube_shorts"]},
+                source=source_record,
                 editing_plan=plan,
                 target_platform=target_platform,
-                candidate_quality_score=cand.get("quality_score", 80.0),
+                candidate_quality_score=cand.get("quality_score"),
+                quality_evaluation=cand,
                 clip_metadata={"caption": plan.get("exact_publication_caption")},
             )
 
@@ -255,11 +276,12 @@ class CampaignPipelineOrchestrator:
                     clip_id=clip_id,
                     editing_plan=plan,
                     campaign=campaign,
-                    source=source_record or {"source_verification_status": "verified", "authorized_platforms": ["tiktok", "youtube_shorts"]},
+                    source=source_record,
                     current_video_path=rendered_video_path,
                     validation_result=val_result,
                     target_platform=target_platform,
                     max_attempts=2,
+                    quality_evaluation=cand,
                 )
                 val_result = correction_res["validation"]
                 rendered_video_path = correction_res["video_path"]
@@ -308,9 +330,19 @@ class CampaignPipelineOrchestrator:
             "stage_13_publication_package",
         ])
 
-        pipeline_log["status"] = "completed"
+        if len(pipeline_log["produced_clips"]) > 0:
+            pipeline_log["status"] = "completed"
+        else:
+            pipeline_log["status"] = "failed"
+            pipeline_log["blockers"].append("All candidate clips failed rendering or dual-gate validation.")
+
         pipeline_log["completed_at"] = datetime.now(timezone.utc).isoformat()
         return pipeline_log
 
+    execute_campaign_pipeline = run_pipeline_for_campaign
+
 
 campaign_pipeline_orchestrator = CampaignPipelineOrchestrator()
+
+# Alias for service naming convention
+campaign_pipeline_service = campaign_pipeline_orchestrator

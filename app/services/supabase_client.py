@@ -416,6 +416,7 @@ class DatabaseClient:
                     rejected_rewards REAL DEFAULT 0.0,
                     withdrawable_earnings REAL DEFAULT 0.0,
                     evidence_source TEXT,
+                    marketplace_reward_ref TEXT,
                     evidence_url TEXT,
                     verified_by TEXT,
                     rejection_reason TEXT,
@@ -453,7 +454,55 @@ class DatabaseClient:
                     ip_address TEXT,
                     created_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS clip_inspections (
+                    id TEXT PRIMARY KEY,
+                    clip_id TEXT NOT NULL,
+                    campaign_id TEXT,
+                    video_path TEXT NOT NULL,
+                    gate_a_passed INTEGER NOT NULL,
+                    gate_b_passed INTEGER NOT NULL,
+                    overall_approved INTEGER NOT NULL,
+                    quality_score REAL NOT NULL,
+                    media_metadata TEXT,
+                    frame_samples TEXT,
+                    failures TEXT,
+                    remediation_attempts INTEGER DEFAULT 0,
+                    inspected_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_audit_logs (
+                    id TEXT PRIMARY KEY,
+                    operator_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    previous_value TEXT,
+                    new_value TEXT,
+                    reason TEXT NOT NULL,
+                    evidence_reference TEXT NOT NULL,
+                    timestamp TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS dashboard_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL,
+                    csrf_token TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    ip_address TEXT
+                );
             """)
+            try:
+                conn.execute("ALTER TABLE clip_submissions ADD COLUMN marketplace_reward_ref TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clip_submissions_reward_ref ON clip_submissions(marketplace_reward_ref) WHERE marketplace_reward_ref IS NOT NULL")
+            except sqlite3.IntegrityError:
+                logger.error("Duplicate marketplace reward references exist; unique index was not created")
             try:
                 conn.execute("ALTER TABLE publishing_queue ADD COLUMN privacy_status TEXT DEFAULT 'private'")
             except Exception:
@@ -1978,6 +2027,15 @@ class DatabaseClient:
         d['operator_approved'] = bool(d.get('operator_approved'))
         return d
 
+    def upsert_campaign(self, campaign_data: Dict[str, Any]) -> Dict[str, Any]:
+        cid = campaign_data.get('id')
+        existing = self.get_campaign(cid) if cid else None
+        if existing:
+            updates = {k: v for k, v in campaign_data.items() if k not in {"id", "created_at"}}
+            res = self.update_campaign(cid, updates)
+            return res or existing
+        return self.create_campaign(campaign_data)
+
     def create_campaign(self, campaign_data: Dict[str, Any]) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
         campaign_data.setdefault('created_at', now_iso)
@@ -2114,9 +2172,13 @@ class DatabaseClient:
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(campaigns)")
+            valid_cols = {row["name"] for row in cursor.fetchall()}
             set_clauses = []
             values = []
             for k, v in updates.items():
+                if k not in valid_cols:
+                    continue
                 set_clauses.append(f'{k} = ?')
                 if isinstance(v, (list, dict)):
                     values.append(json.dumps(v))
@@ -2124,6 +2186,8 @@ class DatabaseClient:
                     values.append(1 if v else 0)
                 else:
                     values.append(v)
+            if not set_clauses:
+                return self.get_campaign(campaign_id)
             values.append(campaign_id)
             cursor.execute(f'UPDATE campaigns SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
             conn.commit()
@@ -2131,6 +2195,8 @@ class DatabaseClient:
 
     def create_campaign_source(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
+        if not source_data.get('campaign_id'):
+            raise ValueError('Campaign source records must be associated with a campaign.')
         source_data.setdefault('created_at', now_iso)
         source_data.setdefault('updated_at', now_iso)
         if self.has_supabase:
@@ -2186,6 +2252,8 @@ class DatabaseClient:
                     except Exception:
                         d[k] = []
             return d
+
+    register_content_source = create_campaign_source
 
     def list_campaign_sources(self, campaign_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if self.has_supabase:
@@ -2427,14 +2495,20 @@ class DatabaseClient:
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(clip_submissions)")
+            valid_cols = {row["name"] for row in cursor.fetchall()}
             set_clauses = []
             values = []
             for k, v in updates.items():
+                if k not in valid_cols:
+                    continue
                 set_clauses.append(f'{k} = ?')
                 if isinstance(v, (list, dict)):
                     values.append(json.dumps(v))
                 else:
                     values.append(v)
+            if not set_clauses:
+                return self.get_clip_submission(submission_id)
             values.append(submission_id)
             cursor.execute(f'UPDATE clip_submissions SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
             conn.commit()
@@ -2527,6 +2601,206 @@ class DatabaseClient:
             else:
                 row = conn.execute("SELECT COUNT(*) FROM candidate_evaluations").fetchone()
             return row[0] if row else 0
+
+
+
+
+    # -------------------------------------------------------------------------
+    # Clip Inspections CRUD
+    # -------------------------------------------------------------------------
+    def record_clip_inspection(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        record.setdefault("inspected_at", now_iso)
+        if not record.get("id"):
+            record["id"] = f"insp_{record.get('clip_id', 'clip')}_{int(datetime.now().timestamp())}"
+
+        if self.has_supabase:
+            try:
+                self.client.table("clip_inspections").insert(record).execute()
+                return record
+            except Exception as exc:
+                logger.warning("Could not persist clip inspection to Supabase: %s", exc)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO clip_inspections
+                (id, clip_id, campaign_id, video_path, gate_a_passed, gate_b_passed,
+                 overall_approved, quality_score, media_metadata, frame_samples, failures,
+                 remediation_attempts, inspected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.get("id"),
+                    record.get("clip_id"),
+                    record.get("campaign_id"),
+                    record.get("video_path"),
+                    1 if record.get("gate_a_passed") else 0,
+                    1 if record.get("gate_b_passed") else 0,
+                    1 if record.get("overall_approved") else 0,
+                    float(record.get("quality_score", 0.0)),
+                    json.dumps(record.get("media_metadata") or {}) if isinstance(record.get("media_metadata"), dict) else record.get("media_metadata"),
+                    json.dumps(record.get("frame_samples") or []) if isinstance(record.get("frame_samples"), list) else record.get("frame_samples"),
+                    json.dumps(record.get("failures") or []) if isinstance(record.get("failures"), list) else record.get("failures"),
+                    int(record.get("remediation_attempts", 0)),
+                    record.get("inspected_at"),
+                )
+            )
+        return record
+
+    def get_clip_inspection(self, clip_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            try:
+                res = self.client.table("clip_inspections").select("*").eq("clip_id", clip_id).order("inspected_at", desc=True).limit(1).execute()
+                if res.data:
+                    return res.data[0]
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM clip_inspections WHERE clip_id = ? ORDER BY inspected_at DESC LIMIT 1", (clip_id,)).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["gate_a_passed"] = bool(data.get("gate_a_passed"))
+            data["gate_b_passed"] = bool(data.get("gate_b_passed"))
+            data["overall_approved"] = bool(data.get("overall_approved"))
+            return data
+
+    def list_clip_inspections(self, campaign_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            try:
+                q = self.client.table("clip_inspections").select("*").order("inspected_at", desc=True).limit(limit)
+                if campaign_id:
+                    q = q.eq("campaign_id", campaign_id)
+                res = q.execute()
+                return res.data or []
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if campaign_id:
+                rows = conn.execute("SELECT * FROM clip_inspections WHERE campaign_id = ? ORDER BY inspected_at DESC LIMIT ?", (campaign_id, limit)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM clip_inspections ORDER BY inspected_at DESC LIMIT ?", (limit,)).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["gate_a_passed"] = bool(d.get("gate_a_passed"))
+                d["gate_b_passed"] = bool(d.get("gate_b_passed"))
+                d["overall_approved"] = bool(d.get("overall_approved"))
+                out.append(d)
+            return out
+
+    # -------------------------------------------------------------------------
+    # Operator Audit Logs CRUD
+    # -------------------------------------------------------------------------
+    def record_operator_audit(self, record: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        rec = dict(record or {})
+        rec.update(kwargs)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        rec.setdefault("timestamp", now_iso)
+        if not rec.get("id"):
+            rec["id"] = f"op_audit_{uuid.uuid4().hex[:12]}"
+        record = rec
+
+        if self.has_supabase:
+            try:
+                self.client.table("operator_audit_logs").insert(record).execute()
+                return record
+            except Exception as exc:
+                logger.warning("Could not persist operator audit log to Supabase: %s", exc)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO operator_audit_logs
+                (id, operator_id, action, entity_type, entity_id, previous_value, new_value, reason, evidence_reference, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.get("id"),
+                    record.get("operator_id"),
+                    record.get("action"),
+                    record.get("entity_type"),
+                    record.get("entity_id"),
+                    json.dumps(record.get("previous_value")) if isinstance(record.get("previous_value"), (dict, list)) else record.get("previous_value"),
+                    json.dumps(record.get("new_value")) if isinstance(record.get("new_value"), (dict, list)) else record.get("new_value"),
+                    record.get("reason"),
+                    record.get("evidence_reference"),
+                    record.get("timestamp"),
+                )
+            )
+        return record
+
+    def list_operator_audits(self, entity_id: Optional[str] = None, action: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            try:
+                q = self.client.table("operator_audit_logs").select("*").order("timestamp", desc=True).limit(limit)
+                if entity_id:
+                    q = q.eq("entity_id", entity_id)
+                if action:
+                    q = q.eq("action", action)
+                res = q.execute()
+                return res.data or []
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            clauses = []
+            params = []
+            if entity_id:
+                clauses.append("entity_id = ?")
+                params.append(entity_id)
+            if action:
+                clauses.append("action = ?")
+                params.append(action)
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            params.append(limit)
+            rows = conn.execute(f"SELECT * FROM operator_audit_logs {where} ORDER BY timestamp DESC LIMIT ?", params).fetchall()
+            return [dict(r) for r in rows]
+
+    # -------------------------------------------------------------------------
+    # Dashboard Session Management
+    # -------------------------------------------------------------------------
+    def create_session(self, session_data: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO dashboard_sessions
+                (session_id, user_id, role, is_admin, csrf_token, created_at, expires_at, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_data.get("session_id"),
+                    session_data.get("user_id"),
+                    session_data.get("role", "admin"),
+                    1 if session_data.get("is_admin", True) else 0,
+                    session_data.get("csrf_token"),
+                    session_data.get("created_at"),
+                    session_data.get("expires_at"),
+                    session_data.get("ip_address"),
+                )
+            )
+        return session_data
+
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM dashboard_sessions WHERE session_id = ?", (session_id,)).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["is_admin"] = bool(data.get("is_admin"))
+            return data
+
+    def delete_session(self, session_id: str) -> bool:
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            res = conn.execute("DELETE FROM dashboard_sessions WHERE session_id = ?", (session_id,))
+            return res.rowcount > 0
 
 
 db = DatabaseClient()

@@ -49,8 +49,8 @@ class SourceAuthorizationService:
             "original_creator": original_creator,
             "source_type": source_type,
             "permission_evidence": evidence_str,
-            "allowed_derivative_uses": allowed_derivative_uses or ["short_form_clipping"],
-            "authorized_platforms": authorized_platforms or ["tiktok"],
+            "allowed_derivative_uses": allowed_derivative_uses or [],
+            "authorized_platforms": authorized_platforms or [],
             "permission_expiry": permission_expiry,
             "source_verification_status": SourceVerificationStatus.PENDING_VERIFICATION.value,
             "verified_by": None,
@@ -86,6 +86,12 @@ class SourceAuthorizationService:
         if len(evidence) < 10 or evidence.lower() in ["none", "n/a", "ok", "yes", "trailer", "public"]:
             return False, "Verification Rejected: Permission evidence is missing, vague, or insufficient.", source
 
+        # A verified flag alone is insufficient; require an auditable operator identity/time.
+        creator = str(source.get("original_creator") or "").strip()
+        if (not verified_by or not str(verified_by).strip() or not creator
+                or creator.lower() in {"unknown", "n/a", "none", "unspecified"}):
+            return False, "Verification Rejected: a named rights holder and operator identity are required.", source
+
         # 2. Platforms Check
         platforms = source.get("authorized_platforms") or []
         if not platforms:
@@ -96,7 +102,7 @@ class SourceAuthorizationService:
         if "short_form_clipping" not in uses and "clipping" not in uses:
             return False, "Verification Rejected: Footage does not permit derivative short-form clipping.", source
 
-        # 4. Expiration Check
+        # 4. Expiration Check (fail closed on expired or unparseable timestamps)
         expiry = source.get("permission_expiry")
         if expiry:
             try:
@@ -104,10 +110,11 @@ class SourceAuthorizationService:
                 expiry_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
                 if expiry_dt < now:
                     return False, f"Verification Rejected: Source permission has already expired on {expiry}.", source
-            except Exception:
-                pass
+            except Exception as exc:
+                return False, f"Verification Rejected: Malformed or unparseable permission expiry date: {expiry}", source
 
         now_str = datetime.now(timezone.utc).isoformat()
+        previous_status = source.get("source_verification_status")
         updates = {
             "source_verification_status": SourceVerificationStatus.VERIFIED.value,
             "verified_by": verified_by,
@@ -119,6 +126,20 @@ class SourceAuthorizationService:
             updates["notes"] = f"{existing_notes} [Verified by {verified_by}: {notes}]".strip()
 
         updated = db.update_campaign_source(source_id, updates)
+
+        # Record auditable operator action
+        db.record_operator_audit({
+            "operator_id": str(verified_by),
+            "action": "confirm_source_permission",
+            "entity_type": "campaign_source",
+            "entity_id": str(source_id),
+            "previous_value": {"status": previous_status},
+            "new_value": {"status": SourceVerificationStatus.VERIFIED.value, "verified_at": now_str},
+            "reason": notes or "Operator manual verification of permission documentation",
+            "evidence_reference": evidence[:500],
+            "timestamp": now_str,
+        })
+
         logger.info("Source %s verified by operator %s", source_id, verified_by)
         return True, "Source footage verified by operator.", updated
 
@@ -144,6 +165,9 @@ class SourceAuthorizationService:
         status = source.get("source_verification_status")
         if status != SourceVerificationStatus.VERIFIED.value:
             return False, f"Source permission has status '{status}' (operator verification required).", source
+        evidence = str(source.get("permission_evidence") or "").strip()
+        if len(evidence) < 10 or not source.get("original_creator") or not source.get("verified_by") or not source.get("verified_at"):
+            return False, "Source lacks complete, auditable rights-holder and operator evidence.", source
 
         # 3. Platform Authorization Check
         authorized_platforms = [p.lower() for p in (source.get("authorized_platforms") or [])]
@@ -155,7 +179,7 @@ class SourceAuthorizationService:
         if "short_form_clipping" not in allowed_uses and "clipping" not in allowed_uses:
             return False, "Source does not authorize derivative short-form clipping.", source
 
-        # 5. Expiration Check
+        # 5. Expiration Check (fail closed on expired or unparseable timestamps)
         expiry = source.get("permission_expiry")
         if expiry:
             try:
@@ -164,9 +188,10 @@ class SourceAuthorizationService:
                 if expiry_dt < now:
                     return False, f"Source permission expired on {expiry}.", source
             except Exception:
-                pass
+                return False, f"Source permission has invalid or unparseable expiry date: {expiry}.", source
 
         return True, "Source footage verified and authorized for production.", source
 
 
+SourceAuthorizationService.verify_source_for_campaign = SourceAuthorizationService.verify_source
 source_authorization_service = SourceAuthorizationService()

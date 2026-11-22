@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..schemas import ClipComplianceResult
@@ -24,22 +25,60 @@ class ComplianceValidator:
     Fails closed on missing or unrendered video files.
     """
 
+    def inspect_video_media(self, video_path: str) -> Dict[str, Any]:
+        """Inspect an existing media file with ffprobe and sample frames with ffmpeg."""
+        result = {"is_valid_format": False, "container_format": "", "width": 0, "height": 0,
+                  "duration": 0.0, "frame_samples": [], "error": None}
+        if not video_path or not os.path.isfile(video_path):
+            result["error"] = "Video file is missing"
+            return result
+        try:
+            probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                "format=format_name,duration:stream=codec_type,codec_name,width,height,duration",
+                "-of", "json", video_path], capture_output=True, text=True, check=True, timeout=30)
+            data = json.loads(probe.stdout)
+            fmt = data.get("format", {})
+            video = next((x for x in data.get("streams", []) if x.get("codec_type") == "video"), None)
+            audio = next((x for x in data.get("streams", []) if x.get("codec_type") == "audio"), None)
+            if not video or not audio:
+                raise ValueError("A video and audio stream are both required")
+            result.update({"is_valid_format": True, "container_format": fmt.get("format_name", ""),
+                "width": int(video.get("width") or 0), "height": int(video.get("height") or 0),
+                "duration": float(fmt.get("duration") or video.get("duration") or 0),
+                "codec_video": video.get("codec_name"), "codec_audio": audio.get("codec_name")})
+            duration = result["duration"]
+            if duration > 0:
+                outdir = os.path.join("/tmp", "gta6_media_inspections", str(abs(hash(os.path.realpath(video_path)))))
+                os.makedirs(outdir, exist_ok=True)
+                for i, offset in enumerate((duration * .1, duration * .5, duration * .9)):
+                    frame = os.path.join(outdir, f"frame_{i}.jpg")
+                    proc = subprocess.run(["ffmpeg", "-y", "-ss", str(offset), "-i", video_path,
+                        "-frames:v", "1", "-q:v", "3", frame], capture_output=True, text=True, timeout=30)
+                    if proc.returncode == 0 and os.path.isfile(frame):
+                        result["frame_samples"].append({"time_offset": offset, "path": frame})
+        except Exception as exc:
+            result["error"] = str(exc)
+        return result
+
     def validate_clip_compliance(
         self,
         clip_id: str,
         video_path: Optional[str],
-        campaign: Dict[str, Any],
-        source: Optional[Dict[str, Any]],
+        campaign: Optional[Dict[str, Any]] = None,
+        source: Optional[Dict[str, Any]] = None,
         target_platform: str = "tiktok",
         clip_metadata: Optional[Dict[str, Any]] = None,
         candidate_metadata: Optional[Dict[str, Any]] = None,
         existing_clips: Optional[List[Dict[str, Any]]] = None,
+        **kwargs,
     ) -> ClipComplianceResult:
         """
         Run 12 rigorous compliance checks on generated clip against campaign rules.
         Requires an actual existing video file on disk. Fails closed on video_path=None.
         """
-        meta = clip_metadata or {}
+        campaign = campaign or {}
+        source = source or {}
+        meta = clip_metadata or candidate_metadata or {}
         checks = {
             "duration": False,
             "aspect_ratio": False,
@@ -65,14 +104,28 @@ class ComplianceValidator:
             failure_reasons.append(f"Target platform '{target_platform}' not accepted by campaign {campaign.get('id')}.")
 
         # 2. Source Permission Check (Fail-closed)
-        if source and source.get("source_verification_status") in ("verified", "authorized"):
-            auth_platforms = [p.lower() for p in (source.get("authorized_platforms") or [])]
-            if target_platform.lower() in auth_platforms or "all" in auth_platforms:
+        permission_record = source.get("permission_evidence")
+        if isinstance(permission_record, str):
+            try:
+                permission_record = json.loads(permission_record)
+            except Exception:
+                permission_record = {"reference": permission_record} if permission_record.strip() else {}
+        permission_record = permission_record if isinstance(permission_record, dict) else {}
+        rights_holder = source.get("rights_holder") or source.get("original_creator") or permission_record.get("rights_holder")
+        permission_reference = permission_record.get("permission_source") or permission_record.get("evidence_reference") or permission_record.get("reference") or (source.get("permission_evidence") if isinstance(source.get("permission_evidence"), str) else None)
+        verified_by = source.get("verified_by") or permission_record.get("verified_by")
+        verified_at = source.get("verified_at") or permission_record.get("verified_at")
+        authorized_uses = source.get("allowed_derivative_uses") or permission_record.get("allowed_derivative_uses") or []
+        if source.get("source_verification_status") == "verified" and rights_holder and permission_reference and verified_by and verified_at:
+            auth_platforms = [str(p).lower() for p in (source.get("authorized_platforms") or permission_record.get("authorized_platforms") or [])]
+            use_ok = any(str(u).lower() in ("short_form_clipping", "clipping", "short_form_video") for u in authorized_uses)
+            platform_ok = target_platform.lower() in auth_platforms or "all" in auth_platforms
+            if use_ok and platform_ok:
                 checks["source_permission"] = True
             else:
-                failure_reasons.append(f"Source footage rights do not cover platform '{target_platform}'.")
+                failure_reasons.append(f"Source rights do not explicitly authorize clipping on '{target_platform}'.")
         else:
-            failure_reasons.append("Source footage lacks verified reuse permissions.")
+            failure_reasons.append("Source lacks complete, auditable reuse-rights evidence.")
 
         # 3. Audio/Video File Inspection (Fail-closed on missing file)
         min_dur = float(campaign.get("min_clip_duration_seconds") or 15.0)
@@ -210,14 +263,14 @@ class ComplianceValidator:
                 if ex.get("id") != clip_id:
                     if video_path and ex.get("video_path") == video_path:
                         checks["duplicate_check"] = False
-                        failure_reasons.append(f"Duplicate video file path matching clip {ex.get(id)}.")
+                        failure_reasons.append(f"Duplicate video file path matching clip {ex.get("id")}.")
                         break
                     ex_start = ex.get("start_time")
                     ex_end = ex.get("end_time")
                     if cand_start is not None and cand_end is not None and ex_start is not None and ex_end is not None:
                         if abs(float(cand_start) - float(ex_start)) < 1.0 and abs(float(cand_end) - float(ex_end)) < 1.0:
                             checks["duplicate_check"] = False
-                            failure_reasons.append(f"Duplicate highlight timing matches existing clip {ex.get(id)}.")
+                            failure_reasons.append(f"Duplicate highlight timing matches existing clip {ex.get("id")}.")
                             break
 
         is_compliant = (len(failure_reasons) == 0) and bool(details.get("file_exists"))
@@ -242,19 +295,35 @@ class ComplianceValidator:
         source: Optional[Dict[str, Any]],
         editing_plan: Optional[Dict[str, Any]] = None,
         target_platform: str = "tiktok",
-        candidate_quality_score: float = 80.0,
+        candidate_quality_score: Optional[float] = None,
         clip_metadata: Optional[Dict[str, Any]] = None,
         candidate_metadata: Optional[Dict[str, Any]] = None,
         existing_clips: Optional[List[Dict[str, Any]]] = None,
+        quality_evaluation: Optional[Dict[str, Any]] = None,
+        rendered_video_path: Optional[str] = None,
+        campaign_rules: Optional[Dict[str, Any]] = None,
+        source_rights_verified: Optional[bool] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
-        """
-        Two Independent Approval Gates:
-        Gate A: Creative Quality (Hook, Clarity, Pacing, Audio/Visual Quality, Quality Score >= 75.0)
-        Gate B: Campaign Compliance & Source Authorization (Permissions, Platform, Duration, 9:16 Aspect, Hashtags, Branding)
-
-        Both must independently pass against the actual rendered video output.
-        Fails closed on missing video_path or missing video file.
-        """
+        """Evaluate creative and campaign gates independently, failing closed on missing evidence."""
+        if rendered_video_path and not video_path:
+            video_path = rendered_video_path
+        if campaign_rules is not None and campaign is None:
+            campaign = campaign_rules
+        campaign = campaign or {}
+        source = source or {}
+        required_quality_factors = ("hook_strength", "entertainment_value", "story_clarity", "reaction_payoff",
+                                    "visual_audio_quality", "caption_potential", "replay_potential")
+        quality_records = (quality_evaluation or {}).get("analysis_evidence") or {}
+        quality_provenance_valid = bool(quality_evaluation and quality_evaluation.get("evidence_backed") is True
+            and all(isinstance(quality_records.get(k), dict)
+                    and (quality_records[k].get("evidence_reference") or quality_records[k].get("source_reference"))
+                    and (quality_records[k].get("source_id") or quality_evaluation.get("source_id"))
+                    and (quality_records[k].get("observed_at") or quality_records[k].get("timestamp"))
+                    and quality_records[k].get("score", quality_records[k].get("value")) is not None
+                    for k in required_quality_factors))
+        if quality_provenance_valid:
+            candidate_quality_score = quality_evaluation.get("quality_score")
         plan = editing_plan or {}
         meta = dict(clip_metadata or candidate_metadata or {})
         if not meta.get("caption") and plan.get("exact_publication_caption"):
@@ -266,12 +335,24 @@ class ComplianceValidator:
         # Gate A: Creative Quality Evaluation
         # -----------------------------------------------------------------
         gate_a_issues = []
-        if candidate_quality_score < 75.0:
-            gate_a_issues.append(f"Creative quality score {candidate_quality_score:.1f} is below minimum production threshold (75.0).")
+        evidence_backed = quality_provenance_valid
+        if candidate_quality_score is None or not evidence_backed:
+            gate_a_issues.append("Evidence-backed quality evaluation is missing or incomplete.")
+            candidate_quality_score = float(candidate_quality_score or 0.0)
+        elif float(candidate_quality_score) < 75.0:
+            gate_a_issues.append(f"Creative quality score {float(candidate_quality_score):.1f} is below minimum production threshold (75.0).")
 
-        hook_score = float(meta.get("hook_score") or plan.get("opening_hook", {}).get("score", 8.0))
-        if hook_score < 6.0:
-            gate_a_issues.append(f"Hook score ({hook_score:.1f}) is too weak for high-retention short.")
+        hook_score = None
+        score_evidence = (quality_evaluation or {}).get("analysis_evidence") or {}
+        hook_evidence = score_evidence.get("hook_strength") if isinstance(score_evidence, dict) else None
+        if isinstance(hook_evidence, dict):
+            hook_evidence = hook_evidence.get("score", hook_evidence.get("value"))
+        if hook_evidence is None:
+            gate_a_issues.append("Hook scoring evidence is missing.")
+        else:
+            hook_score = float(hook_evidence)
+            if hook_score < 6.0:
+                gate_a_issues.append(f"Hook score ({hook_score:.1f}) is too weak for high-retention short.")
 
         duplication_risk = False
         if existing_clips:
@@ -345,7 +426,9 @@ class ComplianceValidator:
         if not overall_approved:
             fatal_terms = ["rights", "permission", "not accepted by campaign", "duplication"]
             has_fatal = any(any(k in iss.lower() for k in fatal_terms) for iss in (gate_a_issues + gate_b_issues))
-            if not has_fatal and video_path is not None:
+            if (not has_fatal and video_path is not None and gate_a_passed
+                    and comp_res.checks.get("source_permission", False)
+                    and comp_res.checks.get("platform_eligibility", False)):
                 can_auto_correct = True
 
         return {
@@ -359,6 +442,7 @@ class ComplianceValidator:
             "gate_a_creative_quality": gate_a_report,
             "gate_b_campaign_compliance": gate_b_report,
             "decision": "APPROVED_FOR_PRODUCTION" if overall_approved else "REJECTED_NEEDS_RESOLUTION",
+            "quality_evaluation": quality_evaluation if quality_provenance_valid else None,
         }
 
     def attempt_auto_correction_and_rerender(
@@ -371,6 +455,7 @@ class ComplianceValidator:
         validation_result: Dict[str, Any],
         target_platform: str = "tiktok",
         max_attempts: int = 2,
+        quality_evaluation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         When a correctable problem is detected:
@@ -401,6 +486,7 @@ class ComplianceValidator:
                 "reason": "Uncorrectable failure (permissions, platform eligibility, or fatal defect).",
             }
 
+        quality_evaluation = quality_evaluation or validation_result.get("quality_evaluation")
         curr_plan = copy.deepcopy(editing_plan)
         curr_video = current_video_path
         latest_val = validation_result
@@ -461,7 +547,8 @@ class ComplianceValidator:
                 source=source,
                 editing_plan=curr_plan,
                 target_platform=target_platform,
-                candidate_quality_score=curr_plan.get("quality_score", 80.0),
+                candidate_quality_score=(quality_evaluation or {}).get("quality_score"),
+                quality_evaluation=quality_evaluation,
                 clip_metadata={"caption": curr_plan.get("exact_publication_caption")},
             )
 

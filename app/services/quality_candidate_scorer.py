@@ -72,9 +72,31 @@ class QualityCandidateScorer:
         Fails closed: missing evidence yields 0.0 points for that factor.
         """
         rejection_reasons = []
-        evidence = candidate.get("analysis_evidence") or candidate.get("evidence") or {}
-        if not isinstance(evidence, dict):
-            evidence = {}
+        candidate = dict(candidate or {})
+        raw_evidence = candidate.get("analysis_evidence") or candidate.get("evidence") or {}
+        if not isinstance(raw_evidence, dict):
+            raw_evidence = {}
+        evidence = {}
+        evidence_records = {}
+        required_factors = (
+            "hook_strength", "entertainment_value", "story_clarity", "reaction_payoff",
+            "visual_audio_quality", "caption_potential", "replay_potential",
+        )
+        for factor in required_factors:
+            item = raw_evidence.get(factor)
+            if isinstance(item, dict):
+                reference = item.get("evidence_reference") or item.get("source_reference")
+                source_id = item.get("source_id") or candidate.get("source_id") or candidate.get("source_video_id")
+                observed_at = item.get("observed_at") or item.get("timestamp")
+                score = item.get("score", item.get("value"))
+                if reference and source_id and observed_at and score is not None:
+                    evidence[factor] = score
+                    evidence_records[factor] = dict(item)
+        # Caller-supplied scores are not trusted unless backed by per-factor source evidence.
+        for key in ("hook_score", "entertainment_value", "excitement_score", "story_clarity", "clarity_score",
+                    "reaction_payoff", "climax_score", "visual_audio_quality", "caption_potential", "replay_potential"):
+            candidate.pop(key, None)
+        candidate["analysis_evidence"] = evidence
 
         # 1. Hook Strength (0 - max_weight)
         # Requires actual hook score or hook detection cues
@@ -89,7 +111,9 @@ class QualityCandidateScorer:
         else:
             raw_h = float(raw_hook)
             # Normalize scale (0-10 or 0-20)
-            if raw_h <= 10.0 and max_hook > 10.0:
+            if raw_h <= 1.0:
+                hook_points = min(max_hook, max(0.0, raw_h * max_hook))
+            elif raw_h <= 10.0 and max_hook > 10.0:
                 hook_points = min(max_hook, max(0.0, raw_h * (max_hook / 10.0)))
             else:
                 hook_points = min(max_hook, max(0.0, raw_h))
@@ -107,7 +131,9 @@ class QualityCandidateScorer:
             rejection_reasons.append("Missing entertainment analysis evidence")
         else:
             raw_e = float(raw_ent)
-            if raw_e <= 10.0 and max_ent > 10.0:
+            if raw_e <= 1.0:
+                ent_points = min(max_ent, max(0.0, raw_e * max_ent))
+            elif raw_e <= 10.0 and max_ent > 10.0:
                 ent_points = min(max_ent, max(0.0, raw_e * (max_ent / 10.0)))
             else:
                 ent_points = min(max_ent, max(0.0, raw_e))
@@ -125,7 +151,9 @@ class QualityCandidateScorer:
             rejection_reasons.append("Missing story clarity evidence")
         else:
             raw_s = float(raw_story)
-            if raw_s <= 10.0 and max_story > 10.0:
+            if raw_s <= 1.0:
+                story_points = min(max_story, max(0.0, raw_s * max_story))
+            elif raw_s <= 10.0 and max_story > 10.0:
                 story_points = min(max_story, max(0.0, raw_s * (max_story / 10.0)))
             else:
                 story_points = min(max_story, max(0.0, raw_s))
@@ -143,7 +171,9 @@ class QualityCandidateScorer:
             rejection_reasons.append("Missing reaction/payoff evidence")
         else:
             raw_p = float(raw_payoff)
-            if raw_p <= 10.0 and max_payoff > 10.0:
+            if raw_p <= 1.0:
+                payoff_points = min(max_payoff, max(0.0, raw_p * max_payoff))
+            elif raw_p <= 10.0 and max_payoff > 10.0:
                 payoff_points = min(max_payoff, max(0.0, raw_p * (max_payoff / 10.0)))
             else:
                 payoff_points = min(max_payoff, max(0.0, raw_p))
@@ -212,8 +242,8 @@ class QualityCandidateScorer:
             else:
                 fit_points = max_fit
         else:
-            # Without campaign context, fit is neutral
-            fit_points = max_fit * 0.6
+            fit_points = 0.0
+            rejection_reasons.append("Missing eligible campaign context for campaign-fit scoring")
 
         # Calculate Total Score
         total_score = round(
@@ -221,6 +251,24 @@ class QualityCandidateScorer:
             va_points + cap_points + rep_points + fit_points,
             1,
         )
+
+        # Timestamp validation against source duration
+        src_dur = candidate.get("source_duration")
+        if src_dur is None and isinstance(evidence, dict):
+            src_dur = evidence.get("source_duration")
+        st = candidate.get("start_time")
+        et = candidate.get("end_time")
+        if src_dur is not None and st is not None and et is not None:
+            try:
+                dur_val = float(src_dur)
+                st_val = float(st)
+                et_val = float(et)
+                if st_val < 0 or et_val <= st_val or et_val > (dur_val + 0.5):
+                    rejection_reasons.append(
+                        f"Timestamp validation failed: candidate window [{st_val}, {et_val}] exceeds source duration {dur_val}"
+                    )
+            except Exception as exc:
+                rejection_reasons.append(f"Invalid timestamp format: {exc}")
 
         # Assign Tier and Verdict
         is_incomplete = len(rejection_reasons) >= 3 or total_score == 0.0
@@ -254,7 +302,7 @@ class QualityCandidateScorer:
             "campaign_fit": round(fit_points, 1),
         }
 
-        cand_id = candidate.get("id") or f"cand_{candidate.get('start_time', 0)}_{candidate.get('end_time', 0)}"
+        cand_id = candidate.get("candidate_id") or candidate.get("id") or f"cand_{candidate.get('start_time', 0)}_{candidate.get('end_time', 0)}"
         result = {
             "candidate_id": cand_id,
             "source_id": candidate.get("source_video_id") or candidate.get("source_id", "unknown_source"),
@@ -272,7 +320,8 @@ class QualityCandidateScorer:
             "factor_breakdown": breakdown,
             "max_possible_score": sum(self.weights.values()),
             "rejection_reasons": rejection_reasons,
-            "analysis_evidence": evidence,
+            "analysis_evidence": evidence_records,
+            "evidence_backed": len(evidence_records) == len(required_factors),
             "scored_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -291,7 +340,7 @@ class QualityCandidateScorer:
                     "tier": tier,
                     "verdict": verdict,
                     "factor_breakdown": json.dumps(breakdown),
-                    "analysis_evidence": json.dumps(evidence),
+                    "analysis_evidence": json.dumps(evidence_records),
                     "rejection_reasons": json.dumps(rejection_reasons),
                     "created_at": result["scored_at"],
                 })
@@ -299,6 +348,8 @@ class QualityCandidateScorer:
                 logger.warning("Could not persist candidate evaluation %s: %s", cand_id, exc)
 
         return result
+
+    evaluate_candidate = score_candidate
 
     def score_and_rank_candidates(
         self,
@@ -331,8 +382,41 @@ class QualityCandidateScorer:
         # Sort descending by quality score
         sorted_candidates = sorted(scored_candidates, key=lambda x: x["quality_score"], reverse=True)
 
-        # Select only qualifying candidates (>= 75.0) up to target_max
-        selected = [c for c in sorted_candidates if c["quality_score"] >= self.MIN_PASSING_SCORE][:target_max]
+        # Select only qualifying candidates (>= 75.0) up to target_max, resolving near-duplicate overlaps
+        selected = []
+        for c in sorted_candidates:
+            if c["quality_score"] < self.MIN_PASSING_SCORE:
+                continue
+            if len(selected) >= target_max:
+                break
+
+            # Check overlap with already selected candidates from the same source
+            src_id = c.get("source_id")
+            c_start = c.get("start_time")
+            c_end = c.get("end_time")
+
+            is_overlap = False
+            if src_id and c_start is not None and c_end is not None:
+                try:
+                    cs_f = float(c_start)
+                    ce_f = float(c_end)
+                    for sel in selected:
+                        if sel.get("source_id") == src_id and sel.get("start_time") is not None and sel.get("end_time") is not None:
+                            ss_f = float(sel.get("start_time"))
+                            se_f = float(sel.get("end_time"))
+                            # Overlap occurs if intervals intersect
+                            if not (ce_f <= ss_f or se_f <= cs_f):
+                                is_overlap = True
+                                c["rejection_reasons"].append(
+                                    f"Overlaps with higher-scoring candidate {sel.get('candidate_id')} from same source"
+                                )
+                                break
+                except Exception:
+                    pass
+
+            if not is_overlap:
+                selected.append(c)
+
         rejected = [c for c in sorted_candidates if c not in selected]
 
         total_analyzed = len(bounded_candidates)
@@ -375,3 +459,4 @@ class QualityCandidateScorer:
 
 
 quality_candidate_scorer = QualityCandidateScorer()
+QualityCandidateScorer.evaluate_candidate = QualityCandidateScorer.score_candidate

@@ -1,11 +1,12 @@
 """Test CLI entrypoint."""
 import subprocess
 import sys
+from pathlib import Path
 
 
 def test_cli_help():
     result = subprocess.run(
-        [sys.executable, "main.py", "--help"],
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "main.py"), "--help"],
         capture_output=True,
         text=True,
     )

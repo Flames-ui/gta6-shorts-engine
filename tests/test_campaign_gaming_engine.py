@@ -6,6 +6,7 @@ unauthorized direct clipping rejection, zero-fabrication discovery, strict opera
 source rights verification, budget limits, and earnings tracking foundations.
 """
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -322,7 +323,11 @@ def test_clip_duration_compliance_restrictions():
     }
     source = {
         "source_verification_status": "verified",
-        "authorized_platforms": ["tiktok"],
+        "original_creator": "Test creator",
+        "permission_evidence": {"permission_source": "license-ref", "rights_holder": "Test creator",
+                                "verified_by": "operator-test", "verified_at": "2026-11-22T00:00:00Z"},
+        "verified_by": "operator-test", "verified_at": "2026-11-22T00:00:00Z",
+        "allowed_derivative_uses": ["short_form_clipping"], "authorized_platforms": ["tiktok"],
     }
 
     # Too short (15s < 20s)
@@ -487,7 +492,7 @@ def test_earnings_tracking_validation_and_accounting():
 
 def test_database_migration_grants_and_security():
     """Verify that incremental migration 004 contains explicit service_role grants and revokes public access."""
-    with open("supabase/migrations/20261122020000_campaign_safety_and_grants.sql", "r") as f:
+    with open(Path(__file__).resolve().parents[1] / "supabase/migrations/20261122020000_campaign_safety_and_grants.sql", "r") as f:
         sql = f.read()
     assert "GRANT ALL ON TABLE public.campaigns TO service_role;" in sql
     assert "GRANT SELECT ON TABLE public.campaigns TO authenticated;" in sql

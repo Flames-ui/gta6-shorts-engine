@@ -357,17 +357,82 @@ class GoogleDriveAssetService:
         asset_type = self.classify_asset_type(clean_filename, mime_type)
         now_str = datetime.now(timezone.utc).isoformat()
 
-        # Permission verification check:
-        # Never default to authorized without evidence!
+        # Strict Permission Verification (Milestone 3.1)
+        # NEVER default to authorized, and NEVER default platforms or derivative uses.
+        # No automatic authorization based on license_type or file downloadability alone.
         is_verified = False
         perm_status = "unverified"
         verif_status = "pending_verification"
+        rejection_reason = None
+
+        actual_derivative_uses = list(permitted_derivative_uses or [])
+        actual_platforms = [p.lower() for p in (authorized_platforms or [])]
 
         if permission_evidence and isinstance(permission_evidence, dict):
-            if permission_evidence.get("has_explicit_permission") or permission_evidence.get("license_type"):
+            # Extract evidence fields
+            rights_holder = permission_evidence.get("rights_holder") or permission_evidence.get("authorized_licensor")
+            perm_source = permission_evidence.get("permission_source") or permission_evidence.get("license_source") or permission_evidence.get("document_reference")
+            evidence_uses = permission_evidence.get("permitted_derivative_uses") or []
+            evidence_plats = [p.lower() for p in (permission_evidence.get("authorized_platforms") or [])]
+            verifying_operator = permission_evidence.get("verified_by") or permission_evidence.get("operator_id")
+            verified_at = permission_evidence.get("verified_at")
+            expiry_str = permission_evidence.get("expiry_date") or permission_evidence.get("permission_expiry")
+
+            for u in evidence_uses:
+                if u not in actual_derivative_uses:
+                    actual_derivative_uses.append(u)
+            for p in evidence_plats:
+                if p not in actual_platforms:
+                    actual_platforms.append(p)
+
+            # Check expiration if present
+            is_expired = False
+            if expiry_str:
+                try:
+                    now = datetime.now(timezone.utc)
+                    exp_dt = datetime.fromisoformat(str(expiry_str).replace("Z", "+00:00"))
+                    if exp_dt < now:
+                        is_expired = True
+                        rejection_reason = f"Permission expired on {expiry_str}"
+                except Exception:
+                    is_expired = True
+                    rejection_reason = f"Malformed permission expiry timestamp: {expiry_str}"
+
+            has_valid_derivative = any(u in actual_derivative_uses for u in ["clipping", "short_form_video", "short_form_clipping"])
+            has_valid_platform = any(p in actual_platforms for p in ["tiktok", "youtube_shorts", "all"])
+
+            if is_expired:
+                perm_status = "expired"
+                verif_status = "expired"
+            elif (
+                rights_holder
+                and perm_source
+                and has_valid_derivative
+                and has_valid_platform
+                and verifying_operator
+                and verified_at
+                and permission_evidence.get("verification_status") in ("verified", "approved")
+            ):
                 is_verified = True
                 perm_status = "authorized"
                 verif_status = "verified"
+            else:
+                missing_items = []
+                if not rights_holder: missing_items.append("rights_holder")
+                if not perm_source: missing_items.append("permission_source")
+                if not has_valid_derivative: missing_items.append("permitted_derivative_uses (clipping)")
+                if not has_valid_platform: missing_items.append("authorized_platforms (tiktok/youtube_shorts)")
+                if not verifying_operator: missing_items.append("verified_by")
+                if not verified_at: missing_items.append("verified_at")
+                if permission_evidence.get("verification_status") not in ("verified", "approved"): missing_items.append("verification_status=verified")
+                rejection_reason = f"Missing mandatory permission evidence: {', '.join(missing_items)}"
+
+        attribution_instructions = None
+        if permission_evidence and isinstance(permission_evidence, dict):
+            attribution_instructions = permission_evidence.get("attribution_instructions") or permission_evidence.get("attribution")
+
+        if not is_verified and not rejection_reason:
+            rejection_reason = "Missing mandatory permission documentation and rights evidence."
 
         record = {
             "asset_id": f"asset_{sha256_hash[:12]}",
@@ -385,9 +450,11 @@ class GoogleDriveAssetService:
             "verification_status": verif_status,
             "is_authorized": is_verified,
             "permission_evidence": permission_evidence or {},
+            "rejection_reason": rejection_reason,
             "original_source": original_source,
-            "permitted_derivative_uses": permitted_derivative_uses or ["clipping", "short_form_video"],
-            "authorized_platforms": authorized_platforms or ["tiktok", "youtube_shorts"],
+            "permitted_derivative_uses": actual_derivative_uses,
+            "authorized_platforms": actual_platforms,
+            "attribution_instructions": attribution_instructions,
             "stored_at": now_str,
         }
 
@@ -397,6 +464,8 @@ class GoogleDriveAssetService:
             clean_filename, asset_type, campaign_id, len(content_bytes), sha256_hash[:8], is_verified
         )
         return record
+
+    register_downloaded_asset = register_and_store_asset
 
     def list_campaign_assets(self, campaign_id: str) -> List[Dict[str, Any]]:
         """Returns all registered assets for a specific campaign."""
@@ -488,6 +557,84 @@ class GoogleDriveAssetService:
             "action_id": action["id"],
             "operator_action_required": True,
         }
+
+
+    def operator_verify_asset_permission(
+        self,
+        asset_id: str,
+        verified_by: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+        notes: Optional[str] = None,
+        **kwargs,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """Record a verified permission review with explicit operator identity and evidence."""
+        evidence_dict = dict(evidence or {})
+        for k, v in kwargs.items():
+            if k == "verified_by" and not verified_by:
+                verified_by = v
+            else:
+                evidence_dict[k] = v
+        if not verified_by:
+            return False, "Verification requires an explicit operator identity.", None
+        evidence = evidence_dict
+        asset = self._asset_registry.get(asset_id)
+        if not asset:
+            return False, f"Asset {asset_id} not found in registry.", None
+
+        now_str = datetime.now(timezone.utc).isoformat()
+        evidence_dict = dict(evidence or {})
+        evidence_dict["verified_by"] = str(verified_by)
+        evidence_dict["verified_at"] = now_str
+        evidence_dict["verification_status"] = "verified"
+
+        # Validate evidence fields
+        rights_holder = evidence_dict.get("rights_holder") or evidence_dict.get("authorized_licensor")
+        perm_source = evidence_dict.get("permission_source") or evidence_dict.get("license_source")
+        uses = evidence_dict.get("permitted_derivative_uses") or asset.get("permitted_derivative_uses") or []
+        plats = [p.lower() for p in (evidence_dict.get("authorized_platforms") or asset.get("authorized_platforms") or [])]
+
+        if not rights_holder or not perm_source:
+            return False, "Verification Rejected: rights_holder and permission_source are required.", asset
+
+        if not any(u in uses for u in ["clipping", "short_form_video", "short_form_clipping"]):
+            return False, "Verification Rejected: clipping derivative use must be permitted.", asset
+
+        if not any(p in plats for p in ["tiktok", "youtube_shorts", "all"]):
+            return False, "Verification Rejected: TikTok or YouTube Shorts must be authorized.", asset
+
+        # Expiration check
+        expiry = evidence_dict.get("expiry_date") or evidence_dict.get("permission_expiry")
+        if expiry:
+            try:
+                now = datetime.now(timezone.utc)
+                if datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) < now:
+                    return False, f"Verification Rejected: Permission expired on {expiry}.", asset
+            except Exception:
+                return False, f"Verification Rejected: Invalid expiry date {expiry}.", asset
+
+        asset["is_authorized"] = True
+        asset["permission_status"] = "authorized"
+        asset["verification_status"] = "verified"
+        asset["permission_evidence"] = evidence_dict
+        asset["permitted_derivative_uses"] = uses
+        asset["authorized_platforms"] = plats
+        asset["rejection_reason"] = None
+
+        from .supabase_client import db
+        db.record_operator_audit({
+            "operator_id": str(verified_by),
+            "action": "verify_asset_permission",
+            "entity_type": "campaign_asset",
+            "entity_id": str(asset_id),
+            "previous_value": {"status": "pending_verification"},
+            "new_value": {"status": "verified", "verified_at": now_str},
+            "reason": notes or "Operator manual verification of asset permission documentation",
+            "evidence_reference": str(perm_source)[:500],
+            "timestamp": now_str,
+        })
+
+        logger.info("Asset %s permission verified by operator %s", asset_id, verified_by)
+        return True, "Asset permission verified successfully.", asset
 
 
 google_drive_asset_service = GoogleDriveAssetService()

@@ -371,6 +371,20 @@ def score_quality_candidates(
     return result
 
 
+@router.get("/candidates/evaluated", response_model=List[Dict[str, Any]])
+def list_evaluated_candidates(
+    campaign_id: Optional[str] = None,
+    limit: int = 50,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Returns stored candidate evaluations with 100-point quality scores.
+    """
+    if hasattr(db, 'list_candidate_evaluations'):
+        return db.list_candidate_evaluations(campaign_id=campaign_id, limit=limit)
+    return []
+
+
 @router.post("/campaigns/{campaign_id}/editing-plan", response_model=Dict[str, Any])
 def create_editing_plan_for_campaign(
     campaign_id: str,
@@ -412,15 +426,37 @@ def create_publication_package(
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {payload.campaign_id} not found.")
 
-    # 1. Dual-gate validation
+    # Score only source-referenced analysis evidence, then validate rights and media independently.
+    quality_res = quality_candidate_scorer.score_candidate(payload.candidate_metadata, campaign)
+    source_id = payload.candidate_metadata.get("source_id") or payload.candidate_metadata.get("source_video_id")
+    source = db.get_campaign_source(str(source_id)) if source_id else None
     dual_gate = compliance_validator.validate_dual_gates(
         clip_id=clip_id,
         video_path=payload.video_path,
         campaign=campaign,
+        source=source,
         candidate_metadata=payload.candidate_metadata,
         editing_plan=payload.editing_plan,
         target_platform=payload.target_platform,
+        candidate_quality_score=quality_res.get("quality_score"),
+        quality_evaluation=quality_res,
     )
+
+    media_report = compliance_validator.inspect_video_media(payload.video_path)
+    gate_a = dual_gate.get("gate_a_creative_quality", {})
+    gate_b = dual_gate.get("gate_b_campaign_compliance", {})
+    db.record_clip_inspection({
+        "clip_id": clip_id,
+        "campaign_id": payload.campaign_id,
+        "video_path": payload.video_path,
+        "gate_a_passed": bool(gate_a.get("passed")),
+        "gate_b_passed": bool(gate_b.get("passed")),
+        "overall_approved": bool(dual_gate.get("overall_approved")),
+        "quality_score": float(quality_res.get("quality_score") or 0.0),
+        "media_metadata": media_report,
+        "frame_samples": media_report.get("frame_samples") or [],
+        "failures": (gate_a.get("issues") or []) + (gate_b.get("issues") or []),
+    })
 
     if not dual_gate.get("overall_approved"):
         raise HTTPException(
@@ -431,10 +467,7 @@ def create_publication_package(
             }
         )
 
-    # 2. Score candidate for package metadata
-    quality_res = quality_candidate_scorer.score_candidate(payload.candidate_metadata, campaign)
-
-    # 3. Assemble package
+    # Assemble a manual-only package after both gates pass.
     pkg = publication_package_service.generate_package(
         clip_id=clip_id,
         video_path=payload.video_path,
