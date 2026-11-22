@@ -204,7 +204,7 @@ async def update_source_rights(
        derivative_rights_allowed is true only for an authorized status.
     3. The audit entry is written. If it cannot be written, the update fails.
     4. The source is activated only when an authorized status has passed every step above.
-    Any failure returns 503 and leaves the source inactive.
+    Any failure returns 503 and this request never activates the source.
     """
     require_admin(auth)
 
@@ -253,7 +253,7 @@ async def update_source_rights(
         logger.exception("Rights update failed for source %s; source left inactive", source_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Rights could not be recorded, so the source is not active. Retry the update.",
+            detail="Rights could not be recorded and the source was not activated. Retry the update.",
         )
 
     return {
