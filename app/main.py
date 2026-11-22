@@ -1,14 +1,15 @@
-"""FastAPI application entrypoint for GTA 6 & Multi-Category Viral Shorts Engine."""
+"""FastAPI application entrypoint for GTA 6 Shorts Studio."""
+from .services.rate_limiter import rate_limiter
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
+from .api.v1.endpoints import health
 from .api.v1.router import api_v1_router
 from .config import settings
-from .queue import job_queue
-from .services.supabase_client import db
 
 # Configure structured logging
 logging.basicConfig(
@@ -36,7 +37,7 @@ app = FastAPI(
 )
 
 # -----------------------------------------------------------------------------
-# Security Middleware: Request Size Limits & Headers
+# Security Middleware: Request Size Limits & Defensive Headers
 # -----------------------------------------------------------------------------
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
@@ -50,6 +51,20 @@ async def security_middleware(request: Request, call_next):
                 )
         except ValueError:
             pass
+
+    # Rate limiting on API paths (exempting load balancer health probes and documentation)
+    path = request.url.path
+    if not (path.startswith("/health") or path.startswith("/docs") or path.startswith("/openapi") or path.startswith("/redoc")):
+        auth_header = request.headers.get("X-API-Key") or request.headers.get("Authorization", "")
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"{client_ip}:{auth_header[:16]}"
+        if not rate_limiter.check(rate_key):
+            logger.warning("Rate limit exceeded for %s on %s", client_ip, path)
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Rate limit exceeded. Please wait before submitting more requests."},
+                headers={"Retry-After": "60"},
+            )
 
     response: Response = await call_next(request)
 
@@ -74,39 +89,26 @@ app.add_middleware(
     max_age=600,
 )
 
-
 # -----------------------------------------------------------------------------
-# Root & Health Check Endpoints (For Render & Monitoring)
+# Mount Routers
 # -----------------------------------------------------------------------------
-@app.get("/", tags=["System"])
-async def root():
-    """Service metadata and status summary."""
-    return {
-        "service": "GTA 6 Shorts Engine & Viral Video Pipeline",
-        "version": settings.APP_VERSION,
-        "environment": settings.ENVIRONMENT,
-        "status": "online",
-        "endpoints": {
-            "health": "/health",
-            "docs": "/docs",
-            "api_v1": "/api/v1",
-        },
-    }
-
-
-@app.get("/health", tags=["System"])
-async def health():
-    """Health check endpoint used by Render and container orchestrators."""
-    return {
-        "status": "healthy",
-        "service": "GTA 6 Shorts Engine",
-        "version": settings.APP_VERSION,
-        "redis": "connected" if job_queue.has_redis else "offline",
-        "supabase": "connected" if db.has_supabase else "local_sqlite",
-    }
-
-
-# -----------------------------------------------------------------------------
-# Mount API v1 Master Router
-# -----------------------------------------------------------------------------
+app.include_router(health.router)
 app.include_router(api_v1_router)
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+@app.get("/", include_in_schema=False)
+async def serve_dashboard():
+    """Serve GTA 6 Shorts Studio dashboard frontend."""
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+@app.get("/static/{file_path:path}", include_in_schema=False)
+async def serve_static(file_path: str):
+    """Serve static frontend assets."""
+    static_root = os.path.realpath(STATIC_DIR)
+    target = os.path.realpath(os.path.join(static_root, file_path))
+    if os.path.commonpath([static_root, target]) != static_root:
+        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
+    if not os.path.isfile(target):
+        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
+    return FileResponse(target)

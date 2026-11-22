@@ -1,3 +1,4 @@
+from .supabase_client import db
 """Multi-category architecture and dynamic category registry."""
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -167,6 +168,7 @@ class CategoryService:
 
     def __init__(self):
         self._categories: Dict[str, CategoryDefinition] = dict(INITIAL_CATEGORIES)
+        self._sync_from_db()
 
     def list_categories(self, active_only: bool = True) -> List[CategoryDefinition]:
         cats = list(self._categories.values())
@@ -181,7 +183,44 @@ class CategoryService:
 
     def register_category(self, category: CategoryDefinition) -> CategoryDefinition:
         self._categories[category.id.lower().strip()] = category
+        try:
+            db.save_category(category.model_dump())
+        except Exception:
+            pass
         return category
+    def _sync_from_db(self):
+        try:
+            stored = db.list_categories()
+            for s in stored:
+                cid = s.get("id")
+                if cid:
+                    self._categories[cid.lower()] = CategoryDefinition(
+                        id=cid,
+                        name=s.get("name", cid),
+                        description=s.get("description", ""),
+                        icon=s.get("icon", "sparkles"),
+                        is_active=bool(s.get("is_active", True)),
+                        system_prompt=s.get("system_prompt", ""),
+                        scoring_weights=s.get("scoring_weights") if isinstance(s.get("scoring_weights"), dict) else {},
+                        default_hashtags=s.get("default_hashtags") if isinstance(s.get("default_hashtags"), list) else [],
+                        presets=s.get("presets") if isinstance(s.get("presets"), dict) else {},
+                        publishing_preferences=s.get("publishing_preferences") if isinstance(s.get("publishing_preferences"), dict) else {"platforms": ["tiktok", "youtube_shorts"]},
+                    )
+        except Exception:
+            pass
+
+    def update_category(self, category_id: str, updates: Dict[str, Any]) -> Optional[CategoryDefinition]:
+        current = self.get_category(category_id)
+        if not current:
+            return None
+        current_data = current.model_dump()
+        for k, v in updates.items():
+            if v is not None:
+                current_data[k] = v
+        updated_def = CategoryDefinition(**current_data)
+        self.register_category(updated_def)
+        return updated_def
+
 
     def get_scoring_weights(self, category_id: str) -> Dict[str, float]:
         cat = self.get_category(category_id)

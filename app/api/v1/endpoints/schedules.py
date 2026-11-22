@@ -1,8 +1,9 @@
 """Automated scheduling and daily production quotas endpoints."""
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ....auth import AuthContext, verify_api_key
+from ....auth import AuthContext, require_admin, verify_api_key
 from ....schemas import ProductionScheduleUpdateRequest
 from ....services.scheduler import ProductionScheduleConfig, schedule_manager
 
@@ -16,14 +17,22 @@ async def get_production_schedule(auth: AuthContext = Depends(verify_api_key)):
     return schedule_manager.get_config()
 
 
+@router.get("/usage")
+async def get_schedule_usage(
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)"),
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Retrieve daily scheduling counters, quota consumption, and category distribution."""
+    return schedule_manager.get_daily_usage(date_str=date)
+
+
 @router.patch("")
 async def update_production_schedule(
     payload: ProductionScheduleUpdateRequest,
     auth: AuthContext = Depends(verify_api_key),
 ):
     """Update daily production limits, publishing windows, or pause/resume engine output."""
-    if not auth.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators can adjust production schedules.")
+    require_admin(auth)
 
     current = schedule_manager.get_config()
     data = current.model_dump()

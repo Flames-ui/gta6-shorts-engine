@@ -28,7 +28,7 @@ class StorageService:
         destination_name: str,
         job_id: str = "shared",
         user_id: Optional[str] = None,
-        is_private: bool = False,
+        is_private: bool = True,
     ) -> Tuple[str, str]:
         """
         Upload rendered MP4 clip to Supabase Storage and return (access_url, storage_path).
@@ -51,14 +51,13 @@ class StorageService:
                     file_options={"content-type": "video/mp4", "upsert": "true"},
                 )
 
-                if is_private:
-                    # Generate signed URL valid for 7 days (604800 seconds)
-                    signed_res = supabase.storage.from_(self.bucket).create_signed_url(storage_path, 604800)
-                    url = signed_res.get("signedURL") or signed_res.get("signedUrl")
-                else:
-                    url = supabase.storage.from_(self.bucket).get_public_url(storage_path)
+                # Buckets remain private. Never return an unauthenticated public URL.
+                signed_res = supabase.storage.from_(self.bucket).create_signed_url(storage_path, 3600)
+                url = signed_res.get("signedURL") or signed_res.get("signedUrl")
+                if not url:
+                    raise RuntimeError("Supabase did not return a signed storage URL")
 
-                logger.info("Successfully uploaded %s to Supabase Storage: %s", destination_name, url)
+                logger.info("Successfully uploaded %s to private Supabase Storage path %s", destination_name, storage_path)
                 return url, storage_path
             except Exception as e:
                 logger.error("Failed to upload to Supabase Storage: %s", e)
@@ -97,10 +96,18 @@ class StorageService:
                     file=file_bytes,
                     file_options={"content-type": "image/jpeg", "upsert": "true"},
                 )
-                return supabase.storage.from_(self.bucket).get_public_url(storage_path)
+                signed_res = supabase.storage.from_(self.bucket).create_signed_url(storage_path, 3600)
+                url = signed_res.get("signedURL") or signed_res.get("signedUrl")
+                if not url:
+                    raise RuntimeError("Supabase did not return a signed thumbnail URL")
+                return url
             except Exception as e:
-                logger.error("Failed to upload thumbnail to Supabase Storage: %s", e)
+                logger.error("Failed to upload thumbnail to Supabase Storage")
+                if self.is_prod:
+                    raise RuntimeError("Storage upload failed in production") from e
 
+        if self.is_prod:
+            raise RuntimeError("Supabase Storage is required in production")
         dest_local = os.path.join(self.local_dir, destination_name)
         if os.path.abspath(local_file_path) != os.path.abspath(dest_local):
             shutil.copy2(local_file_path, dest_local)

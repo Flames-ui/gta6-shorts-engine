@@ -1,6 +1,7 @@
 """YouTube Data API v3 OAuth integration and upload service."""
 import logging
 import os
+import secrets
 from typing import Any, Dict, Optional
 from ..config import settings
 from .supabase_client import db
@@ -19,13 +20,26 @@ class YouTubePublisherService:
     def is_configured(self) -> bool:
         return bool(self.client_id and self.client_secret and self.redirect_uri)
 
-    def get_auth_url(self, state: Optional[str] = None) -> Dict[str, str]:
-        """Generate Google OAuth 2.0 authorization URL for YouTube upload permissions."""
+    def get_auth_url(self, state: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, str]:
+        """Generate Google OAuth 2.0 authorization URL with single-use persisted state."""
         if not self.is_configured():
             raise RuntimeError(
                 "YouTube OAuth is not configured. Set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, "
                 "and YOUTUBE_REDIRECT_URI in environment variables."
             )
+
+        if not state:
+            state = secrets.token_urlsafe(32)
+            try:
+                db.save_oauth_state(
+                    state=state,
+                    user_id=user_id,
+                    service="youtube",
+                    redirect_uri=self.redirect_uri,
+                    expires_in_seconds=600,
+                )
+            except Exception as e:
+                logger.warning("Could not persist YouTube OAuth state: %s", e)
 
         from google_auth_oauthlib.flow import Flow
 
@@ -45,7 +59,7 @@ class YouTubePublisherService:
             prompt="consent",
             state=state,
         )
-        return {"authorization_url": auth_url}
+        return {"authorization_url": auth_url, "state": state}
 
     def exchange_code(self, code: str) -> Dict[str, Any]:
         """Exchange authorization code for refresh and access tokens."""

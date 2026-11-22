@@ -38,7 +38,8 @@ def test_job_create_and_lifecycle(client, auth_headers):
     # 2. Duplicate detection without force
     dup_payload = dict(payload, force=False)
     dup_res = client.post("/api/v1/jobs", json=dup_payload, headers=auth_headers)
-    if job["status"] in ("queued", "processing"):
+    current_job = client.get(f"/api/v1/jobs/{job_id}", headers=auth_headers).json()
+    if current_job["status"] in ("queued", "processing"):
         assert dup_res.status_code == 409
 
     # 3. Retrieve job

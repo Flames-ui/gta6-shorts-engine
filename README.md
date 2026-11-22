@@ -228,14 +228,27 @@ To deploy, connect your GitHub repository to [Render](https://render.com) and de
 Lovable dashboards connect to the backend using standard HTTPS requests with the `X-API-Key: <ENGINE_API_KEY>` header:
 
 ### Key Endpoints for Lovable:
-- `GET /health`: Service and dependency status.
-- `GET /api/v1/categories`: Retrieve all categories for selection dropdowns.
-- `POST /api/v1/jobs`: Create video processing job (`url`, `category_id`, `num_clips`, `aspect_ratio`).
-- `GET /api/v1/jobs/{job_id}`: Poll job progress and status (`queued`, `downloading`, `transcribing`, `analyzing`, `rendering`, `completed`, `failed`).
-- `GET /api/v1/clips/{clip_id}`: Retrieve clip details, signed video URL, and generated hooks.
-- `POST /api/v1/clips/{clip_id}/approve`: Mark a clip as approved for social publishing.
-- `POST /api/v1/clips/{clip_id}/schedule`: Submit approved clip to Buffer for scheduled release.
-- `GET /api/v1/analytics/overview`: High-level multi-platform performance metrics.
+- `GET /health`, `/health/ready`, `/health/live`: Health, readiness, and liveness probes.
+- `GET /api/v1/auth/me`: Inspect caller identity, role, and administrator status.
+- `GET /api/v1/dashboard/stats`: Aggregated metrics for Lovable summary cards (total jobs, active jobs, approved clips, active categories, workers).
+- `GET /api/v1/categories`: Retrieve all active and custom categories.
+- `PATCH /api/v1/categories/{category_id}`: Enable, disable, or tune category prompts and scoring weights (Admin only).
+- `POST /api/v1/jobs`: Create video processing job (`url`, `category_id`, `num_clips`, `aspect_ratio`, `mode`).
+- `GET /api/v1/jobs/{job_id}`: Poll job progress, current stage, and execution logs.
+- `GET /api/v1/clips`: List clips with pagination and category filtering (scoped to tenant).
+- `GET /api/v1/clips/{clip_id}`: Retrieve clip details, storage URL, and thumbnail.
+- `POST /api/v1/clips/{clip_id}/approve`: Review and approve a clip for publication.
+- `POST /api/v1/clips/{clip_id}/schedule`: Submit approved clip to Buffer queue with quota and duplicate checks.
+- `GET /api/v1/publishing/buffer/connect`: Generate single-use Buffer OAuth authorization URL.
+- `POST /api/v1/publishing/buffer/callback`: Complete Buffer OAuth with encrypted token persistence.
+- `GET /api/v1/publishing/channels`: List connected social channel profiles for authenticated user.
+- `POST /api/v1/publishing/sync`: Synchronize publishing queue status with Buffer provider API.
+- `GET /api/v1/discovery/feed`: Retrieve discovered content opportunities.
+- `POST /api/v1/discovery/poll`: Actively poll sources with URL normalization and deduplication.
+- `GET /api/v1/quotas`: Check daily production target limits and real-time category distribution.
+- `GET /api/v1/analytics/overview`: Aggregate views, completion rate, and platform metrics.
+- `GET /api/v1/analytics/recommendations`: Empirical data-driven production recommendations.
+- `GET /api/v1/audit-logs`: Review security and operational audit logs.
 
 ---
 
@@ -244,3 +257,61 @@ Lovable dashboards connect to the backend using standard HTTPS requests with the
 - **Redis Offline in Development**: In development or test mode, the system safely falls back to local in-process execution for developer convenience. In production, it fails closed to protect workload integrity.
 - **Missing AI Key**: If Gemini/OpenAI API keys are not supplied, the pipeline activates heuristic highlight fallback mode to allow end-to-end rendering test execution without crashing.
 - **Clip Validation Failures**: Videos failing minimum length, audio presence, or resolution checks are logged and quarantined rather than published.
+
+---
+
+## 13. Production Readiness & External Credentials Checklist
+
+The engine is engineered to run in a fully verified, fail-closed posture in production (`ENVIRONMENT=production` and `FAIL_CLOSED_IN_PRODUCTION=true`). Below is an explicit operational status matrix:
+
+| Component | Implemented Functionality | External Credential Requirement |
+| :--- | :--- | :--- |
+| **Authentication & RBAC** | Cryptographic Supabase JWT (HS256) signature verification, claim & expiry validation, constant-time API key comparisons, strict tenant isolation & non-admin fail-closed checks. | `SUPABASE_JWT_SECRET` and `ENGINE_API_KEY`. |
+| **Database & Persistence** | Supabase PostgreSQL client with full CRUD for jobs, clips, sources, permissions, discovered content, and OAuth states. Row Level Security policies enabled with `security_invoker = true` on compatibility views. | `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (mandatory in production; SQLite permitted only in local/test). |
+| **Queue & Background Worker** | Redis RQ task queue with retry backoff, connection state checks, sanitized logging, and zero-worker reporting when offline. | `REDIS_URL` (mandatory in production; thread-fallback blocked). |
+| **Content Discovery & Rights** | Source registration, database-persisted rights permissions, pre-production and pre-publishing copyright gates. | Public RSS feeds operate immediately; partner feeds require platform/API approval. |
+| **AI Highlight Analysis** | Gemini 2.5 Flash and OpenAI GPT-4o-mini client integration with structured schema parsing. | `GEMINI_API_KEY` or `OPENAI_API_KEY` (heuristic fallback active in dev/test when absent). |
+| **Video Production Engine** | Video downloading, Whisper audio transcription, dynamic vertical 9:16 cropping, visual hook overlay, and duration validation. | FFmpeg 6+ / 7+ system binary and local/container compute. |
+| **Social Publishing (Buffer)** | Cryptographically random OAuth state generation, single-use state validation, external callback handling without API keys, platform-specific constraints validation, and scheduling queue. | Requires `BUFFER_CLIENT_ID`, `BUFFER_CLIENT_SECRET`, and `BUFFER_REDIRECT_URI` registered in Buffer Developer Portal. |
+| **Social Publishing (Direct YouTube)** | OAuth 2.0 direct publishing fallback. | Requires `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` with YouTube Data API v3 scope approval from Google Cloud Console. |
+| **Health & Observability** | `/health` (general status), `/health/ready` (Kubernetes/Render readiness probe, returns 503 if Supabase or Redis are unavailable in production), `/health/live` (liveness probe). | None. |
+
+---
+
+## 14. Step-by-Step Supabase Migration Instructions
+
+1. Log into your [Supabase Dashboard](https://supabase.com/dashboard).
+2. Open your project and navigate to the **SQL Editor**.
+3. Copy and execute the contents of `supabase/migrations/20261121010000_multi_category_and_security.sql`.
+4. Ensure the `shorts` storage bucket exists under **Storage** > **Buckets**, or create a bucket named `shorts` with appropriate read permissions for signed clip streaming.
+5. In **Project Settings** > **API**, retrieve your:
+   - Project URL (`SUPABASE_URL`)
+   - `service_role` secret key (`SUPABASE_SERVICE_ROLE_KEY`)
+   - JWT Secret (`SUPABASE_JWT_SECRET`)
+6. Populate these values in your Render environment variables or `.env`.
+
+---
+
+## 15. Step-by-Step Buffer Connection Instructions
+
+1. Register an application in the [Buffer Developer Portal](https://buffer.com/developers/api).
+2. Set your **Redirect URI** to:
+   `https://<YOUR_RENDER_SERVICE_URL>/api/v1/publishing/buffer/callback`
+3. Copy your `Client ID` and `Client Secret` into `BUFFER_CLIENT_ID` and `BUFFER_CLIENT_SECRET`.
+4. From your Lovable frontend or API client:
+   - Call `GET /api/v1/publishing/buffer/connect`.
+   - The endpoint generates a cryptographically random, persistent OAuth state and returns the Buffer authorization URL.
+   - Redirect your browser to the authorization URL.
+   - Buffer redirects back to `/api/v1/publishing/buffer/callback?code=...&state=...`.
+   - The engine validates and consumes the OAuth state (single-use), exchanges the authorization code for an access token, retrieves connected channels/profiles, and saves them in `publishing_accounts` and `connected_channels`.
+
+
+## Supabase production setup and recovery
+
+1. Rotate any service-role key that has been pasted into chat, logs, tickets, or source control. Store the replacement only in the deployment platform's secret manager as `SUPABASE_SERVICE_ROLE_KEY`; never use it in browser code or commit it.
+2. Apply `supabase/migrations/20261121000000_initial_schema.sql`, then the schema/security migrations in timestamp order, including `20261122000000_persistent_production_state.sql`, using the Supabase CLI or SQL Editor as a database owner. The latest migration adds durable discovery/reconciliation events, render/job recovery metadata, scheduling state, owner-scoped RLS, and private `shorts` storage policies.
+3. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`, `TOKEN_ENCRYPTION_KEY`, and `REDIS_URL` as server-side deployment secrets. The API and worker use the service-role client only server-side; clients authenticate with Supabase user JWTs.
+4. `shorts` is private. Objects use `{user_id}/{job_id}/{filename}` keys and the API returns expiring signed URLs. Never mark this bucket public for convenience.
+5. Processing and publication state is stored in Supabase; Redis remains the execution queue. On worker restart, stale processing jobs can be recovered from persisted status/heartbeat and retried without treating unaccepted provider requests as published.
+
+Do not place a service-role key in this README, `.env.example`, frontend variables, or Git history. SQL migrations must be applied with database-owner access; a Supabase REST service-role token does not provide a general SQL execution endpoint.

@@ -17,10 +17,13 @@ class JobStatus(str, Enum):
 
 class JobStage(str, Enum):
     PENDING = "pending"
+    RIGHTS_CHECK = "rights_check"
     DOWNLOADING = "downloading"
     TRANSCRIBING = "transcribing"
     HIGHLIGHT_DETECTION = "highlight_detection"
     CROPPING_CLIPS = "cropping_clips"
+    MULTITRACK_EDITING = "multitrack_editing"
+    OUTRO_INJECTION = "outro_injection"
     UPLOADING_STORAGE = "uploading_storage"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -189,6 +192,18 @@ class CategoryResponse(BaseModel):
     publishing_preferences: Dict[str, Any]
 
 
+
+class CategoryUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    is_active: Optional[bool] = None
+    system_prompt: Optional[str] = None
+    scoring_weights: Optional[Dict[str, float]] = None
+    default_hashtags: Optional[List[str]] = None
+    presets: Optional[Any] = None
+    publishing_preferences: Optional[Dict[str, Any]] = None
+
 class CategoryCreateRequest(BaseModel):
     id: str = Field(..., pattern=r"^[a-z0-9_]{3,30}$")
     name: str
@@ -213,6 +228,14 @@ class SourceCreateRequest(BaseModel):
     rights_status: str = "pending_verification"
     license_type: Optional[str] = None
     allowed_platforms: List[str] = ["tiktok", "youtube_shorts"]
+
+
+class SourceUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    feed_url: Optional[str] = None
+    channel_url: Optional[str] = None
+    is_active: Optional[bool] = None
+    auto_clip_enabled: Optional[bool] = None
 
 
 class SourceRightsUpdateRequest(BaseModel):
@@ -313,3 +336,44 @@ class StatusResponse(BaseModel):
     default_llm_provider: str = "gemini"
     storage_provider: str = "supabase_storage"
     youtube_oauth_configured: bool = False
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    environment: str
+    timestamp: str
+    redis: str
+    supabase: str
+
+
+class AuthMeResponse(BaseModel):
+    user_id: str
+    role: str
+    is_admin: bool
+    auth_method: str
+
+
+class DashboardStatsResponse(BaseModel):
+    total_jobs: int
+    active_jobs: int
+    completed_jobs: int
+    failed_jobs: int
+    total_clips: int
+    approved_clips: int
+    scheduled_clips: int
+    published_clips: int
+    total_sources: int
+    active_categories: int
+    workers_online: int
+
+
+class AuditLogEntryResponse(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    action: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    details: Dict[str, Any] = {}
+    ip_address: Optional[str] = None
+    created_at: str

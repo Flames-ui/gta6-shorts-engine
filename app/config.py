@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Service Information
-    APP_NAME: str = "GTA 6 & Viral Shorts Engine"
+    APP_NAME: str = "GTA 6 Shorts Engine & Multi-Category Pipeline"
     APP_VERSION: str = "2.0.0"
     ENVIRONMENT: str = Field(default="production", description="Environment: development, test, production")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level: DEBUG, INFO, WARNING, ERROR")
@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = Field(default="gpt-4o-mini", description="OpenAI model name")
     LLM_PROVIDER: str = Field(default="gemini", description="Default LLM provider: gemini or openai")
 
+    # Token Encryption at Rest & Admin Controls
+    TOKEN_ENCRYPTION_KEY: str = Field(default="", description="Secret key for encrypting OAuth tokens at rest")
+    ADMIN_USER_IDS: Union[str, List[str]] = Field(default=[], description="Server-controlled list of admin user IDs")
+    ADMIN_EMAILS: Union[str, List[str]] = Field(default=[], description="Server-controlled list of admin emails")
+
     # Buffer Social Publishing Integration (Primary Publisher)
     BUFFER_CLIENT_ID: str = Field(default="", description="Buffer OAuth Client ID")
     BUFFER_CLIENT_SECRET: str = Field(default="", description="Buffer OAuth Client Secret")
@@ -62,12 +67,27 @@ class Settings(BaseSettings):
     LOCAL_WHISPER_MODEL: str = Field(default="base", description="Whisper model: tiny, base, small, medium, large-v3")
     LOCAL_WHISPER_DEVICE: str = Field(default="auto", description="Whisper device: auto, cpu, cuda")
     LOCAL_OUTPUT_DIR: str = Field(default="output", description="Local directory for temporary renders")
+    OUTPUT_DIR: str = Field(default="output", description="Output directory alias")
     DEFAULT_NUM_CLIPS: int = Field(default=3, description="Default number of clips to extract")
     DEFAULT_ASPECT_RATIO: str = Field(default="9:16", description="Default video aspect ratio")
 
     # Legacy / Optional External API Mode
     MUAPI_API_KEY: str = Field(default="", description="Optional MuAPI key")
     MUAPI_BASE_URL: str = Field(default="https://api.muapi.ai/api/v1", description="MuAPI base URL")
+
+    @field_validator("ADMIN_USER_IDS", mode="before")
+    @classmethod
+    def parse_admin_user_ids(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return v or []
+
+    @field_validator("ADMIN_EMAILS", mode="before")
+    @classmethod
+    def parse_admin_emails(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str):
+            return [x.strip().lower() for x in v.split(",") if x.strip()]
+        return [x.lower() for x in v] if v else []
 
     model_config = SettingsConfigDict(
         env_file=".env",

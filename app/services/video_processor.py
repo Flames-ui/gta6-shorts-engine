@@ -45,6 +45,22 @@ def process_video_job(job_id: str):
         db.update_job_progress(job_id, stage="downloading", progress=10, status="processing")
         db.add_log(job_id, "downloading", f"Acquiring video source for category '{category_id}': {job['url']}")
 
+        # Check source rights (fail-closed in production)
+        source_id = job.get("source_id")
+        if not source_id and settings.ENVIRONMENT.lower() == "production" and settings.FAIL_CLOSED_IN_PRODUCTION:
+            db.update_job_progress(job_id, stage="rights_check", status="failed", error="Rights check failed: No authorized source ID associated with job in production.")
+            db.add_log(job_id, "rights_check", "Blocked by content rights check: Missing authorized source ID.")
+            return
+
+        if source_id:
+            from .discovery.rights_manager import rights_manager
+            allowed, msg = rights_manager.check_rights_for_production(source_id)
+            if not allowed:
+                db.update_job_progress(job_id, stage="rights_check", status="failed", error=f"Rights check failed: {msg}")
+                db.add_log(job_id, "rights_check", f"Blocked by content rights check: {msg}")
+                return
+
+
         raw_url = job["url"].strip()
         source_video_path = None
         video_title = "Source Video"
@@ -185,11 +201,23 @@ def process_video_job(job_id: str):
                 user_id=user_id,
             )
 
+            # Generate thumbnail JPEG
+            thumb_filename = f"{job_id}_{clip_id}_thumb.jpg"
+            local_thumb_path = os.path.join(temp_dir, thumb_filename)
+            thumbnail_url = None
+            try:
+                video_renderer.generate_thumbnail(local_clip_path, local_thumb_path, capture_timestamp=min(1.5, dur / 2.0))
+                if os.path.exists(local_thumb_path) and os.path.getsize(local_thumb_path) > 0:
+                    thumbnail_url = storage_service.upload_thumbnail(local_thumb_path, thumb_filename, job_id, user_id)
+            except Exception as te:
+                logger.warning("Could not generate thumbnail for clip %s: %s", clip_id, te)
+
             clip_record = {
                 "id": clip_id,
                 "job_id": job_id,
                 "user_id": user_id,
                 "category_id": category_id,
+                "source_id": source_id,
                 "title": social_data.get("title") or c_title,
                 "hook_sentence": social_data.get("hook") or c_hook,
                 "virality_reason": c_reason,
@@ -200,7 +228,7 @@ def process_video_job(job_id: str):
                 "aspect_ratio": aspect_ratio,
                 "storage_path": storage_path,
                 "storage_url": public_clip_url,
-                "thumbnail_url": None,
+                "thumbnail_url": thumbnail_url,
                 "publishing_status": "draft",
                 "suggested_tags": social_data.get("hashtags") or category_def.default_hashtags,
                 "is_quality_approved": val_result.is_valid,
@@ -212,11 +240,25 @@ def process_video_job(job_id: str):
         # Step 8: Complete Job
         db.update_job_progress(job_id, stage="completed", progress=100, status="completed")
         db.add_log(job_id, "completed", f"Job finished successfully. Generated {len(rendered_clips)} verified vertical shorts.")
+        db.create_audit_log(
+            action="job_completed",
+            resource_type="job",
+            user_id=user_id,
+            resource_id=job_id,
+            details={"clips_generated": len(rendered_clips), "category_id": category_id, "url": job.get("url")},
+        )
 
     except Exception as e:
         logger.exception("Error processing job %s: %s", job_id, e)
         db.update_job_progress(job_id, stage="failed", progress=0, status="failed", error=str(e))
         db.add_log(job_id, "failed", f"Processing aborted: {str(e)}")
+        db.create_audit_log(
+            action="job_failed",
+            resource_type="job",
+            user_id=user_id,
+            resource_id=job_id,
+            details={"error": str(e), "category_id": category_id, "url": job.get("url")},
+        )
 
     finally:
         # Safe cleanup of all temporary working files

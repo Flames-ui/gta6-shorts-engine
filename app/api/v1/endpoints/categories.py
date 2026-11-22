@@ -3,8 +3,8 @@ import logging
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ....auth import AuthContext, verify_api_key
-from ....schemas import CategoryCreateRequest, CategoryResponse
+from ....auth import AuthContext, require_admin, verify_api_key
+from ....schemas import CategoryCreateRequest, CategoryResponse, CategoryUpdateRequest
 from ....services.categories import CategoryDefinition, category_service
 
 logger = logging.getLogger("gta6_shorts.categories")
@@ -77,4 +77,44 @@ async def create_category(payload: CategoryCreateRequest, auth: AuthContext = De
         default_hashtags=saved.default_hashtags,
         presets=saved.presets,
         publishing_preferences=saved.publishing_preferences,
+    )
+
+from ....services.supabase_client import db
+
+
+@router.patch("/{category_id}", response_model=CategoryResponse)
+async def update_category(
+    category_id: str,
+    payload: CategoryUpdateRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Enable, disable, or configure a content category (prompt, weights, hashtags, presets). Admin only."""
+    require_admin(auth)
+
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No configuration fields provided for update.")
+
+    updated = category_service.update_category(category_id, updates)
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Category '{category_id}' not found.")
+
+    db.create_audit_log(
+        action="category_updated",
+        resource_type="category",
+        user_id=auth.user_id,
+        resource_id=category_id,
+        details=updates,
+    )
+
+    return CategoryResponse(
+        id=updated.id,
+        name=updated.name,
+        description=updated.description,
+        icon=updated.icon,
+        is_active=updated.is_active,
+        scoring_weights=updated.scoring_weights,
+        default_hashtags=updated.default_hashtags,
+        presets=updated.presets,
+        publishing_preferences=updated.publishing_preferences,
     )
