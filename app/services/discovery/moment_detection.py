@@ -8,7 +8,7 @@ Measured motion and loudness cannot supply the hook, story, reaction, caption or
 evidence the scorer requires. So a window without semantic analysis evidence is rejected with the
 scorer's own reasons. Nothing is scored by default, and the legacy heuristic in
 GameplayAnalyzerService.analyze_gameplay_footage is not used, because it assigns fixed or default
-scores.
+scores. Semantic evidence comes from semantic_fn, a multimodal model that watches each window.
 """
 import bisect
 import hashlib
@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..gameplay_analyzer import GameplayAnalyzerService
 from ..quality_candidate_scorer import QualityCandidateScorer
+from .semantic_moments import SemanticAnalysisError, SemanticFn
 
 logger = logging.getLogger("gta6_shorts.discovery.moments")
 
@@ -136,8 +137,12 @@ def analyze_footage(
     score_fn: Optional[ScoreFn] = None,
     motion_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
     audio_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    semantic_fn: Optional[SemanticFn] = None,
 ) -> Dict[str, Any]:
-    """Measure motion and audio, pick candidate windows and score each one. Never renders anything."""
+    """Measure motion and audio, pick candidate windows and score each one. Never renders anything.
+
+    Without semantic_fn, no window receives semantic evidence and every window is rejected by the scorer.
+    """
     if duration > max_seconds:
         raise MomentAnalysisError(
             "duration_exceeds_background_limit",
@@ -154,6 +159,7 @@ def analyze_footage(
         raise MomentAnalysisError("no_motion_signal", "Motion analysis produced no measurable samples.")
 
     candidates: List[Dict[str, Any]] = []
+    semantic_windows = 0
     for peak in find_candidate_peaks(timeline):
         window = window_for_peak(peak["time"], duration)
         if window is None:
@@ -172,6 +178,19 @@ def analyze_footage(
             "source_duration": duration,
             "analysis_evidence": {},
         }
+        model_notes: Dict[str, Any] = {}
+        if semantic_fn is not None:
+            try:
+                semantic = semantic_fn(path, window["start"], window["end"], cand_id, str(source_id)) or {}
+            except SemanticAnalysisError as exc:
+                raise MomentAnalysisError(exc.code, str(exc)) from exc
+            scorer_input["analysis_evidence"] = semantic.get("analysis_evidence") or {}
+            semantic_windows += 1
+            model_notes = {
+                "model": semantic.get("model"),
+                "suggested_hook": semantic.get("suggested_hook") or "",
+                "suggested_caption": semantic.get("suggested_caption") or "",
+            }
         result = score(scorer_input)
         total = float(result.get("total_score") or 0.0)
         candidates.append({
@@ -184,6 +203,9 @@ def analyze_footage(
             "total_score": round(total, 2),
             "qualifies": total >= MIN_PASSING_SCORE,
             "rejection_reasons": list(result.get("rejection_reasons") or []),
+            "factor_breakdown": result.get("factor_breakdown") or {},
+            "evidence": result.get("analysis_evidence") or {},
+            "semantic": model_notes,
         })
 
     candidates.sort(key=lambda c: c["total_score"], reverse=True)
@@ -194,6 +216,7 @@ def analyze_footage(
         "audio_samples": len(audio or []),
         "audio_available": bool(audio),
         "candidate_windows": len(candidates),
+        "semantic_windows": semantic_windows,
         "qualifying": len(qualifying),
         "minimum_score": MIN_PASSING_SCORE,
     })
@@ -202,6 +225,7 @@ def analyze_footage(
             "motion_samples": len(motion or []),
             "audio_samples": len(audio or []),
             "audio_available": bool(audio),
+            "semantic_windows_evaluated": semantic_windows,
         },
         "candidates": candidates,
         "qualifying": qualifying,
