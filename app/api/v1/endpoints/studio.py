@@ -135,3 +135,13 @@ async def preview_studio_video(clip_id: str, auth: AuthContext = Depends(verify_
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rendered video is available for this clip")
     return FileResponse(path, media_type="video/mp4")
+
+
+@router.get("/events")
+async def get_studio_events(
+    clip_id: str = "global",
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Fetch recent studio events history for hydration and live log refresh."""
+    events = studio_hub.get_history(clip_id or "global")
+    return {"events": events, "total": len(events)}
