@@ -34,12 +34,52 @@ class ResolveActionRequest(BaseModel):
     notes: Optional[str] = Field(default=None, description="Resolution notes")
 
 
+
 @router.get("/browser/status", response_model=Dict[str, Any])
 def get_browser_status(auth: AuthContext = Depends(verify_api_key)):
     """Check dedicated browser process health, memory, and Content Rewards session status."""
     return content_rewards_operator.check_session_status()
 
 
+@router.get("/accounts/status", response_model=Dict[str, Any])
+async def get_marketplace_accounts_status(auth: AuthContext = Depends(verify_api_key)):
+    """Retrieve truthful connection and readiness status for Creator Rewards marketplaces."""
+    from ....services.marketplaces.content_rewards_operator import content_rewards_operator
+    from ....services.supabase_client import db
+
+    session_status = content_rewards_operator.check_session_status()
+    campaigns_data = db.list_campaigns()
+    campaigns = campaigns_data[0] if isinstance(campaigns_data, tuple) else campaigns_data
+    eligible_count = len([c for c in campaigns if isinstance(c, dict) and c.get("marketplace_id") == "content_rewards" and c.get("status") == "approved"])
+
+    return {
+        "marketplaces": {
+            "content_rewards": {
+                "name": "Content Rewards",
+                "priority": 1,
+                "connected": session_status.get("authenticated", False),
+                "browser_running": session_status.get("browser_running", False),
+                "has_persisted_session": session_status.get("has_persisted_session", False),
+                "active_cookies_count": session_status.get("active_cookies_count", 0),
+                "operator_action_required": session_status.get("operator_action_required", False),
+                "eligible_campaigns_count": eligible_count,
+            },
+            "vyro": {
+                "name": "Vyro",
+                "priority": 2,
+                "connected": False,
+                "status": "ready_for_enrollment",
+                "notes": "Secondary marketplace integration staged for multi-network arbitrage.",
+            },
+            "clipster": {
+                "name": "Clipster",
+                "priority": 3,
+                "connected": False,
+                "status": "ready_for_enrollment",
+                "notes": "Gaming-focused creator bounty network staged for deployment.",
+            },
+        }
+    }
 @router.post("/browser/start", response_model=Dict[str, Any])
 def start_browser(auth: AuthContext = Depends(verify_api_key)):
     """Start the dedicated persistent Chromium browser session."""

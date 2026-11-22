@@ -8,6 +8,7 @@ from ....auth import AuthContext, _check_is_admin_claim, verify_api_key, verify_
 from ....config import settings
 from ....schemas import AuthMeResponse, DashboardLoginRequest
 from ....services.supabase_client import db
+from ....services.rate_limiter import check_login_rate_limit
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -23,7 +24,7 @@ async def get_current_user_profile(auth: AuthContext = Depends(verify_api_key)):
     )
 
 
-@router.post("/login", response_model=Dict[str, Any])
+@router.post("/login", response_model=Dict[str, Any], dependencies=[Depends(check_login_rate_limit)])
 async def login_operator(
     payload: DashboardLoginRequest,
     request: Request,
@@ -64,7 +65,7 @@ async def login_operator(
     session_id = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
-    expires_at = (now + timedelta(days=7)).isoformat()
+    expires_at = (now + timedelta(days=30)).isoformat()
 
     session_record = {
         "session_id": session_id,
@@ -85,7 +86,7 @@ async def login_operator(
         secure=settings.ENVIRONMENT.lower() == "production",
         samesite="lax",
         path="/",
-        max_age=7 * 86400,
+        max_age=30 * 86400,
     )
 
     return {
@@ -93,6 +94,7 @@ async def login_operator(
         "user_id": user_id,
         "role": role,
         "csrf_token": csrf_token,
+        "expires_at": expires_at,
     }
 
 
@@ -117,6 +119,7 @@ async def get_session(request: Request):
         "user_id": sess.get("user_id", "system_admin"),
         "role": sess.get("role", "admin"),
         "csrf_token": sess.get("csrf_token"),
+        "expires_at": sess.get("expires_at"),
     }
 
 

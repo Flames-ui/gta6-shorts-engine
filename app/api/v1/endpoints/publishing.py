@@ -35,6 +35,10 @@ class YouTubeCallbackRequest(BaseModel):
     code: str
     state: Optional[str] = None
 
+class BufferApiKeyConnectRequest(BaseModel):
+    api_key: str = Field(..., description="Buffer API Key for GraphQL API authentication")
+
+
 
 @router.get("/buffer/connect", response_model=BufferConnectResponse)
 async def get_buffer_connect_url(auth: AuthContext = Depends(verify_api_key)):
@@ -139,19 +143,150 @@ async def handle_youtube_callback(payload: YouTubeCallbackRequest):
     try:
         token_data = youtube_publisher.exchange_code(payload.code)
         user_id = state_record.get("user_id") or "admin"
+        channel_info = youtube_publisher.get_channel_identity(token_data)
+        channel_id = channel_info.get("channel_id") or f"youtube_{user_id}"
+        channel_title = channel_info.get("title") or "YouTube Channel"
+
         saved = db.save_publishing_account({
             "id": f"youtube_{user_id}",
             "user_id": user_id,
             "service": "youtube",
+            "account_identifier": channel_id,
             "access_token": token_data.get("token"),
             "refresh_token": token_data.get("refresh_token"),
             "is_active": True,
+            "metadata": {
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "thumbnail": channel_info.get("thumbnail"),
+                "custom_url": channel_info.get("custom_url"),
+                "verified": channel_info.get("verified", False),
+            },
         })
-        return {"status": "connected", "service": "youtube", "account_id": saved.get("id")}
+        db.create_channel({
+            "id": f"yt_{channel_id}",
+            "user_id": user_id,
+            "service": "youtube",
+            "account_id": f"youtube_{user_id}",
+            "channel_identifier": channel_id,
+            "name": channel_title,
+            "status": "connected",
+            "metadata": channel_info,
+        })
+        return {
+            "status": "connected",
+            "service": "youtube",
+            "account_id": saved.get("id"),
+            "channel_id": channel_id,
+            "channel_title": channel_title,
+        }
     except Exception as exc:
         logger.error("YouTube authorization exchange failed: %s", exc)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"YouTube OAuth exchange failed: {exc}") from exc
 
+
+
+@router.post("/buffer/connect", response_model=Dict[str, Any])
+@router.post("/buffer/connect-key", response_model=Dict[str, Any])
+async def connect_buffer_api_key(
+    payload: BufferApiKeyConnectRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """
+    Connect Buffer using one-time API key. Validates via official Buffer GraphQL API,
+    encrypts the key at rest, retrieves organizations and channels, and stores them.
+    Never exposes or logs the raw API key.
+    """
+    result = buffer_publisher.connect_with_api_key(api_key=payload.api_key, user_id=auth.user_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.get("error", "Failed to connect Buffer with provided API key."),
+        )
+    return result
+
+
+@router.get("/buffer/status", response_model=Dict[str, Any])
+async def get_buffer_status(auth: AuthContext = Depends(verify_api_key)):
+    """Retrieve verified Buffer connection status, account identity, and connected channels."""
+    return buffer_publisher.get_connection_status(user_id=auth.user_id)
+
+
+@router.post("/buffer/disconnect", response_model=Dict[str, Any])
+async def disconnect_buffer(auth: AuthContext = Depends(verify_api_key)):
+    """Disconnect Buffer integration and remove associated channels."""
+    return buffer_publisher.disconnect(user_id=auth.user_id)
+
+
+@router.get("/youtube/status", response_model=Dict[str, Any])
+async def get_youtube_status(auth: AuthContext = Depends(verify_api_key)):
+    """Retrieve YouTube connection status, discovered channel identity, and upload readiness."""
+    return youtube_publisher.get_status(user_id=auth.user_id)
+
+
+@router.post("/youtube/disconnect", response_model=Dict[str, Any])
+async def disconnect_youtube(auth: AuthContext = Depends(verify_api_key)):
+    """Disconnect YouTube integration."""
+    return youtube_publisher.disconnect(user_id=auth.user_id)
+
+
+@router.get("/tiktok/status", response_model=Dict[str, Any])
+async def get_tiktok_status(auth: AuthContext = Depends(verify_api_key)):
+    """
+    Inspect TikTok connection status and capabilities. Clearly distinguishes
+    Buffer-mediated publishing vs direct TikTok API integration.
+    """
+    buffer_status = buffer_publisher.get_connection_status(user_id=auth.user_id)
+    has_buffer = buffer_status.get("connected", False)
+    buf_channels = buffer_status.get("channels", [])
+    buf_tiktok = [c for c in buf_channels if c.get("service") == "tiktok"]
+
+    channels = db.list_channels(user_id=auth.user_id)
+    direct_tiktok = [c for c in channels if (c.get("metadata") or {}).get("service_type") == "tiktok" or c.get("service") == "tiktok"]
+
+    if buf_tiktok:
+        route = "Buffer-Mediated"
+        connected = True
+        tiktok_channels = buf_tiktok
+    elif direct_tiktok:
+        route = "Direct-API"
+        connected = True
+        tiktok_channels = direct_tiktok
+    else:
+        route = "none"
+        connected = False
+        tiktok_channels = []
+
+    return {
+        "connected": connected,
+        "publishing_route": route,
+        "channel_count": len(tiktok_channels),
+        "channels": tiktok_channels,
+        "buffer_mediated": {
+            "available": has_buffer,
+            "connected_tiktok_channels": [
+                {
+                    "id": c.get("channel_identifier") or c.get("id"),
+                    "name": c.get("name"),
+                    "status": c.get("status", "connected"),
+                    "service": c.get("service", "tiktok"),
+                }
+                for c in buf_tiktok
+            ],
+        },
+        "direct_api": {
+            "connected": bool(direct_tiktok),
+            "status": "connected" if direct_tiktok else "not_configured",
+            "note": "Publishing mediated via Buffer integration" if has_buffer else "Direct TikTok API credentials required",
+        },
+        "capabilities": {
+            "video_upload": True,
+            "max_duration_seconds": 60.0,
+            "aspect_ratio": "9:16",
+            "commercial_content_disclosures": True,
+            "privacy_options": ["public", "private", "friends"],
+        },
+    }
 
 @router.post("/publish-now")
 async def publish_clip_now(payload: PublishNowRequest, auth: AuthContext = Depends(verify_api_key)):
@@ -264,3 +399,14 @@ async def sync_publishing_queue(auth: AuthContext = Depends(verify_api_key)):
             sync_res = buffer_publisher.sync_publishing_item_status(it["id"], user_id=auth.user_id)
             synced_items.append({"id": it["id"], "result": sync_res})
     return {"synced_count": len(synced_items), "items": synced_items}
+
+
+@router.get("/youtube/processing/{video_id}", response_model=Dict[str, Any])
+async def get_youtube_video_processing(
+    video_id: str,
+    auth: AuthContext = Depends(verify_api_key)
+):
+    """Inspect YouTube video processing status without modifying production assets."""
+    from ....services.youtube_publisher import youtube_publisher
+    result = youtube_publisher.check_processing_status(video_id=video_id, user_id=auth.user_id)
+    return result

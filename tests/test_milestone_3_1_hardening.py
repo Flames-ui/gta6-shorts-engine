@@ -227,3 +227,60 @@ def test_dashboard_login_sets_cookie_and_csrf_protects_mutations(client):
         "reward_amount": 10, "marketplace_ref": "ref-with-csrf"}, headers={"X-CSRF-Token": token})
     assert with_token.status_code in (400, 404)
     client.cookies.clear()
+
+def test_session_hashed_at_rest_and_persists_across_restart(client):
+    import sqlite3
+    import hashlib
+    # 1. Login to create a session
+    res = client.post("/api/v1/auth/login", json={"api_key": settings.ENGINE_API_KEY})
+    assert res.status_code == 200
+    session_id = client.cookies.get("session_id")
+    assert session_id
+
+    # 2. Inspect session database directly to ensure cookie is NOT plaintext
+    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    with sqlite3.connect(db.session_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        # Plaintext session_id must not be found
+        bad_row = conn.execute("SELECT * FROM dashboard_sessions WHERE session_hash = ?", (session_id,)).fetchone()
+        assert bad_row is None
+        # Hash must be found
+        good_row = conn.execute("SELECT * FROM dashboard_sessions WHERE session_hash = ?", (session_hash,)).fetchone()
+        assert good_row is not None
+        assert good_row["user_id"] == "system_admin"
+
+    # 3. Simulate process restart by reloading session with a fresh DatabaseClient instance
+    from app.services.supabase_client import DatabaseClient
+    fresh_db = DatabaseClient()
+    retrieved = fresh_db.get_session(session_id)
+    assert retrieved is not None
+    assert retrieved["user_id"] == "system_admin"
+    client.cookies.clear()
+
+
+def test_session_cookie_30_day_lifetime(client):
+    res = client.post("/api/v1/auth/login", json={"api_key": settings.ENGINE_API_KEY})
+    assert res.status_code == 200
+    # Verify Set-Cookie header contains Max-Age=2592000 (30 days)
+    set_cookie = res.headers.get("set-cookie", "")
+    assert "session_id=" in set_cookie
+    assert "Max-Age=2592000" in set_cookie or "max-age=2592000" in set_cookie.lower()
+    client.cookies.clear()
+
+
+def test_login_rate_limiting_throttles_after_8_attempts(client):
+    from app.services.rate_limiter import login_rate_limiter
+    login_rate_limiter.history.clear()
+
+    # First 8 attempts should process (even if credentials invalid)
+    for i in range(8):
+        res = client.post("/api/v1/auth/login", json={"api_key": "wrong_key"})
+        assert res.status_code == 401
+
+    # 9th attempt within same minute must be HTTP 429
+    res9 = client.post("/api/v1/auth/login", json={"api_key": "wrong_key"})
+    assert res9.status_code == 429
+    assert "Retry-After" in res9.headers
+
+    login_rate_limiter.history.clear()
+    client.cookies.clear()

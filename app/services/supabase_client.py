@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from .security import encrypt_secret, decrypt_secret
 """Supabase database persistence service with multi-category support and fail-closed production safety."""
@@ -56,9 +57,51 @@ class DatabaseClient:
             else:
                 self.has_supabase = False
 
+        # Configure dedicated persistent session database
+        if settings.SESSION_DB_PATH:
+            self.session_db_path = settings.SESSION_DB_PATH
+        elif is_prod:
+            self.session_db_path = "/var/data/operator_sessions.sqlite3"
+        else:
+            self.session_db_path = os.path.join(settings.LOCAL_OUTPUT_DIR, "operator_sessions.sqlite3")
+
+        # In production, verify session persistence path configuration
+        if is_prod and not settings.SESSION_DB_PATH and not os.path.isdir("/var/data"):
+            logger.critical("FATAL: SESSION_DB_PATH must be configured in production for persistent operator sessions.")
+            raise RuntimeError("FATAL: SESSION_DB_PATH must be configured in production.")
+
+        self._init_session_db()
+
         if not self.has_supabase:
             logger.info("Initializing embedded SQLite storage for development/test environment.")
             self._init_sqlite()
+        else:
+            self.sqlite_path = os.path.join(settings.LOCAL_OUTPUT_DIR, "shorts_engine.db")
+
+    def _init_session_db(self):
+        """Initialize dedicated SQLite database for persistent operator sessions."""
+        try:
+            parent_dir = os.path.dirname(self.session_db_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            with self.lock, sqlite3.connect(self.session_db_path) as conn:
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS dashboard_sessions (
+                        session_hash TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'admin',
+                        is_admin INTEGER NOT NULL DEFAULT 1,
+                        csrf_token TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        ip_address TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON dashboard_sessions(expires_at);
+                """)
+            logger.info("Persistent operator session DB initialized at %s", self.session_db_path)
+        except Exception as e:
+            logger.critical("Failed to initialize session database at %s: %s", self.session_db_path, e)
+            raise
 
     def _init_sqlite(self):
         """Initialize comprehensive SQLite database for local development and testing."""
@@ -216,6 +259,7 @@ class DatabaseClient:
                     access_token_encrypted TEXT,
                     refresh_token_encrypted TEXT,
                     token_expires_at TEXT,
+                    metadata TEXT,
                     created_at TEXT,
                     updated_at TEXT
                 );
@@ -1161,22 +1205,30 @@ class DatabaseClient:
             res = self.client.table("publishing_accounts").upsert(account_data, on_conflict="id").execute()
             return res.data[0] if res.data else account_data
 
+        meta_raw = account_data.get("metadata")
+        meta_json = json.dumps(meta_raw) if isinstance(meta_raw, dict) else (meta_raw or "{}")
+
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            try:
+                conn.execute("ALTER TABLE publishing_accounts ADD COLUMN metadata TEXT")
+            except Exception:
+                pass
             conn.execute(
                 """
                 INSERT OR REPLACE INTO publishing_accounts
-                (id, user_id, service, account_identifier, is_active, access_token_encrypted, refresh_token_encrypted, token_expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, user_id, service, account_identifier, is_active, access_token_encrypted, refresh_token_encrypted, token_expires_at, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_data["id"],
                     account_data.get("user_id"),
-                    account_data["service"],
-                    account_data.get("account_identifier"),
+                    account_data.get("service") or account_data.get("platform") or "unknown",
+                    account_data.get("account_identifier") or account_data.get("account_id"),
                     1 if account_data.get("is_active", True) else 0,
                     account_data.get("access_token_encrypted"),
                     account_data.get("refresh_token_encrypted"),
                     account_data.get("token_expires_at"),
+                    meta_json,
                     account_data["created_at"],
                     account_data["updated_at"],
                 ),
@@ -1195,7 +1247,15 @@ class DatabaseClient:
                     "SELECT * FROM publishing_accounts WHERE user_id = ? AND service = ? AND is_active = 1 LIMIT 1",
                     (user_id, service),
                 ).fetchone()
-                acc = dict(row) if row else None
+                if not row:
+                    acc = None
+                else:
+                    acc = dict(row)
+                    if "metadata" in acc and isinstance(acc["metadata"], str):
+                        try:
+                            acc["metadata"] = json.loads(acc["metadata"])
+                        except Exception:
+                            acc["metadata"] = {}
 
         if acc:
             if acc.get("access_token_encrypted"):
@@ -1438,7 +1498,7 @@ class DatabaseClient:
 
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
             conn.execute(
-                "INSERT INTO channels (id, user_id, channel_name, channel_url, auto_clip_new_videos, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO channels (id, user_id, channel_name, channel_url, auto_clip_new_videos, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     channel_data["id"],
                     channel_data.get("user_id"),
@@ -1455,6 +1515,15 @@ class DatabaseClient:
     # -------------------------------------------------------------------------
     # Audit Logs
     # -------------------------------------------------------------------------
+    def delete_channel(self, channel_id: str) -> bool:
+        if self.has_supabase:
+            self.client.table("connected_channels").delete().eq("id", channel_id).execute()
+            return True
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute("DELETE FROM connected_channels WHERE id = ?", (channel_id,))
+            return True
+
+
     def create_audit_log(
         self,
         action: str,
@@ -1697,6 +1766,15 @@ class DatabaseClient:
                 acc["refresh_token"] = token
         return accounts
 
+
+
+    def delete_publishing_account(self, account_id: str) -> bool:
+        if self.has_supabase:
+            self.client.table("publishing_accounts").delete().eq("id", account_id).execute()
+            return True
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute("DELETE FROM publishing_accounts WHERE id = ?", (account_id,))
+            return True
 
 
     def get_publishing_queue_item(self, item_id: str) -> Optional[Dict[str, Any]]:
@@ -2767,22 +2845,28 @@ class DatabaseClient:
             return [dict(r) for r in rows]
 
     # -------------------------------------------------------------------------
-    # Dashboard Session Management
+    # -------------------------------------------------------------------------
+    # Dashboard Session Management (Hashed at rest & persistent)
     # -------------------------------------------------------------------------
     def create_session(self, session_data: Dict[str, Any]) -> Dict[str, Any]:
-        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+        session_id = session_data.get("session_id")
+        if not session_id:
+            raise ValueError("session_id is required")
+        session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+        with self.lock, sqlite3.connect(self.session_db_path) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO dashboard_sessions
-                (session_id, user_id, role, is_admin, csrf_token, created_at, expires_at, ip_address)
+                (session_hash, user_id, role, is_admin, csrf_token, created_at, expires_at, ip_address)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    session_data.get("session_id"),
-                    session_data.get("user_id"),
+                    session_hash,
+                    session_data.get("user_id", "system_admin"),
                     session_data.get("role", "admin"),
                     1 if session_data.get("is_admin", True) else 0,
-                    session_data.get("csrf_token"),
+                    session_data.get("csrf_token", ""),
                     session_data.get("created_at"),
                     session_data.get("expires_at"),
                     session_data.get("ip_address"),
@@ -2791,19 +2875,33 @@ class DatabaseClient:
         return session_data
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+        if not session_id:
+            return None
+        session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        with self.lock, sqlite3.connect(self.session_db_path) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT * FROM dashboard_sessions WHERE session_id = ?", (session_id,)).fetchone()
+            row = conn.execute("SELECT * FROM dashboard_sessions WHERE session_hash = ?", (session_hash,)).fetchone()
             if not row:
                 return None
             data = dict(row)
             data["is_admin"] = bool(data.get("is_admin"))
+            exp = data.get("expires_at")
+            if exp:
+                try:
+                    exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > exp_dt:
+                        self.delete_session(session_id)
+                        return None
+                except Exception:
+                    pass
             return data
 
     def delete_session(self, session_id: str) -> bool:
-        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
-            res = conn.execute("DELETE FROM dashboard_sessions WHERE session_id = ?", (session_id,))
-            return res.rowcount > 0
-
+        if not session_id:
+            return False
+        session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        with self.lock, sqlite3.connect(self.session_db_path) as conn:
+            cursor = conn.execute("DELETE FROM dashboard_sessions WHERE session_hash = ?", (session_hash,))
+            return cursor.rowcount > 0
 
 db = DatabaseClient()

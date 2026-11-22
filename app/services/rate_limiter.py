@@ -46,3 +46,19 @@ async def check_rate_limit(request: Request):
             detail="Rate limit exceeded. Please wait before submitting more requests.",
             headers={"Retry-After": "60"},
         )
+
+
+login_rate_limiter = SlidingWindowRateLimiter(requests_per_minute=8)
+
+
+async def check_login_rate_limit(request: Request):
+    """Rate limit login attempts to 8 per minute per IP to prevent brute force."""
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"login:{client_ip}"
+    if not login_rate_limiter.check(key):
+        logger.warning("Operator login rate limit exceeded for IP %s", client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please wait 60 seconds before trying again.",
+            headers={"Retry-After": "60"},
+        )

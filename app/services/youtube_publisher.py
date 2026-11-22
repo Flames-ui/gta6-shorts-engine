@@ -169,4 +169,149 @@ class YouTubePublisherService:
         }
 
 
+
+    def get_channel_identity(self, credentials_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve verified channel identity from YouTube Data API v3."""
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+
+            creds = Credentials(
+                token=credentials_dict.get("token"),
+                refresh_token=credentials_dict.get("refresh_token"),
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                scopes=SCOPES,
+            )
+            youtube = build("youtube", "v3", credentials=creds)
+            res = youtube.channels().list(part="snippet,status,contentDetails", mine=True).execute()
+            items = res.get("items", [])
+            if not items:
+                return {"verified": False, "error": "No YouTube channel found for authenticated Google account."}
+            channel = items[0]
+            snippet = channel.get("snippet", {})
+            return {
+                "verified": True,
+                "channel_id": channel.get("id"),
+                "title": snippet.get("title"),
+                "description": snippet.get("description"),
+                "custom_url": snippet.get("customUrl"),
+                "published_at": snippet.get("publishedAt"),
+                "thumbnail": snippet.get("thumbnails", {}).get("default", {}).get("url"),
+                "privacy_status": channel.get("status", {}).get("privacyStatus", "public"),
+            }
+        except Exception as e:
+            logger.error("Failed to retrieve YouTube channel identity: %s", e)
+            return {"verified": False, "error": str(e)}
+
+    def check_processing_status(self, video_id: str, credentials_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Reconcile YouTube video upload and processing status via videos.list."""
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+
+            creds = Credentials(
+                token=credentials_dict.get("token"),
+                refresh_token=credentials_dict.get("refresh_token"),
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                scopes=SCOPES,
+            )
+            youtube = build("youtube", "v3", credentials=creds)
+            res = youtube.videos().list(part="snippet,status,processingDetails", id=video_id).execute()
+            items = res.get("items", [])
+            if not items:
+                return {"found": False, "status": "not_found", "video_id": video_id}
+            vid = items[0]
+            status_obj = vid.get("status", {})
+            proc_obj = vid.get("processingDetails", {})
+
+            upload_status = status_obj.get("uploadStatus")
+            processing_status = proc_obj.get("processingStatus")
+            privacy_status = status_obj.get("privacyStatus")
+
+            is_ready = upload_status == "processed" or processing_status == "succeeded"
+            is_failed = upload_status in ("rejected", "failed") or processing_status in ("failed", "terminated")
+
+            return {
+                "found": True,
+                "video_id": video_id,
+                "upload_status": upload_status,
+                "processing_status": processing_status,
+                "privacy_status": privacy_status,
+                "rejection_reason": status_obj.get("rejectionReason"),
+                "failure_reason": status_obj.get("failureReason"),
+                "is_ready": is_ready,
+                "is_failed": is_failed,
+                "title": vid.get("snippet", {}).get("title"),
+            }
+        except Exception as e:
+            logger.error("Failed to check YouTube video processing status: %s", e)
+            return {"found": False, "error": str(e), "video_id": video_id}
+
+    def get_status(self, user_id: str = "system_admin") -> Dict[str, Any]:
+        """Return truthful connection and readiness status for YouTube integration."""
+        acc = db.get_publishing_account_for_user(user_id, "youtube")
+
+        is_configured = self.is_configured()
+
+        if not acc:
+            return {
+                "connected": False,
+                "status": "disconnected",
+                "oauth_configured": is_configured,
+                "channel_id": None,
+                "channel_title": None,
+                "upload_authorized": False,
+                "upload_permission_granted": False,
+                "has_refresh_token": False,
+                "scopes": [],
+                "readiness": {
+                    "oauth_ready": is_configured,
+                    "channel_discovered": False,
+                    "upload_permission": False,
+                    "refresh_token_valid": False,
+                },
+            }
+
+        meta = acc.get("metadata") or {}
+        scopes = meta.get("scopes", [])
+        has_upload_scope = any("youtube.upload" in s for s in scopes) or any("youtube" in s for s in scopes)
+        has_refresh = bool(acc.get("refresh_token_encrypted") or acc.get("refresh_token"))
+
+        return {
+            "connected": True,
+            "status": "connected",
+            "oauth_configured": is_configured,
+            "account_id": acc.get("id"),
+            "channel_id": meta.get("channel_id") or acc.get("account_identifier"),
+            "channel_title": meta.get("channel_title") or acc.get("account_identifier") or "YouTube Channel",
+            "custom_url": meta.get("custom_url"),
+            "thumbnail": meta.get("thumbnail"),
+            "upload_authorized": has_upload_scope,
+            "upload_permission_granted": has_upload_scope,
+            "has_refresh_token": has_refresh,
+            "default_privacy": "private",
+            "scopes": scopes,
+            "readiness": {
+                "oauth_ready": True,
+                "channel_discovered": bool(meta.get("channel_id") or acc.get("account_identifier")),
+                "upload_permission": has_upload_scope,
+                "refresh_token_valid": has_refresh,
+            },
+        }
+    def disconnect(self, user_id: str = "system_admin") -> Dict[str, Any]:
+        """Disconnect YouTube integration."""
+        acc = db.get_publishing_account_for_user(user_id, "youtube")
+        if acc:
+            db.delete_publishing_account(acc["id"])
+        channels_db = db.list_channels(user_id=user_id)
+        for c in channels_db:
+            if c.get("service") == "youtube":
+                db.delete_channel(c["id"])
+        return {"success": True, "connected": False, "status": "disconnected"}
+
+
 youtube_publisher = YouTubePublisherService()
