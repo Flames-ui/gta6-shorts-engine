@@ -304,3 +304,14 @@ The engine is engineered to run in a fully verified, fail-closed posture in prod
    - Redirect your browser to the authorization URL.
    - Buffer redirects back to `/api/v1/publishing/buffer/callback?code=...&state=...`.
    - The engine validates and consumes the OAuth state (single-use), exchanges the authorization code for an access token, retrieves connected channels/profiles, and saves them in `publishing_accounts` and `connected_channels`.
+
+
+## Supabase production setup and recovery
+
+1. Rotate any service-role key that has been pasted into chat, logs, tickets, or source control. Store the replacement only in the deployment platform's secret manager as `SUPABASE_SERVICE_ROLE_KEY`; never use it in browser code or commit it.
+2. Apply `supabase/migrations/20261121000000_initial_schema.sql`, then the schema/security migrations in timestamp order, including `20261122000000_persistent_production_state.sql`, using the Supabase CLI or SQL Editor as a database owner. The latest migration adds durable discovery/reconciliation events, render/job recovery metadata, scheduling state, owner-scoped RLS, and private `shorts` storage policies.
+3. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`, `TOKEN_ENCRYPTION_KEY`, and `REDIS_URL` as server-side deployment secrets. The API and worker use the service-role client only server-side; clients authenticate with Supabase user JWTs.
+4. `shorts` is private. Objects use `{user_id}/{job_id}/{filename}` keys and the API returns expiring signed URLs. Never mark this bucket public for convenience.
+5. Processing and publication state is stored in Supabase; Redis remains the execution queue. On worker restart, stale processing jobs can be recovered from persisted status/heartbeat and retried without treating unaccepted provider requests as published.
+
+Do not place a service-role key in this README, `.env.example`, frontend variables, or Git history. SQL migrations must be applied with database-owner access; a Supabase REST service-role token does not provide a general SQL execution endpoint.
