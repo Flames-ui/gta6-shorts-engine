@@ -36,4 +36,4 @@ RUN mkdir -p /app/output/clips /app/tmp && chmod -R 777 /app/output /app/tmp
 EXPOSE 8000
 
 # Default command starts FastAPI web service; Render worker overrides via dockerCommand
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["bash", "app/start_combined.sh"]

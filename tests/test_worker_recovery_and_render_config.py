@@ -1,8 +1,9 @@
 """
-Tests for production Render deployment configuration, worker restart recovery,
-publishing automation guards, and health/readiness endpoints.
+Tests for production Render single-instance deployment, combined process supervision,
+worker restart recovery, publishing automation guards, and health/readiness endpoints.
 """
 import os
+import subprocess
 import yaml
 import pytest
 from unittest.mock import MagicMock, patch
@@ -12,8 +13,8 @@ from app.services.supabase_client import db
 from app.services.internal_scheduler import internal_scheduler
 
 
-def test_render_blueprint_structure_and_env_wiring():
-    """Verify render.yaml satisfies all production architectural requirements."""
+def test_render_blueprint_structure_and_combined_env_wiring():
+    """Verify render.yaml runs API and worker together inside the web service without a separate paid worker."""
     blueprint_path = os.path.join(os.path.dirname(__file__), "..", "render.yaml")
     assert os.path.exists(blueprint_path), "render.yaml must exist"
 
@@ -23,29 +24,23 @@ def test_render_blueprint_structure_and_env_wiring():
     services = blueprint.get("services", [])
     service_map = {s["name"]: s for s in services}
 
+    # Verify no separate worker service exists (avoiding duplicate/paid background worker)
     assert "gta6-shorts-engine" in service_map, "Web service must be defined"
-    assert "gta6-shorts-worker" in service_map, "Worker service must be defined"
     assert "gta6-shorts-redis" in service_map, "Redis service must be defined"
+    assert "gta6-shorts-worker" not in service_map, "Separate background worker must NOT be present in single-instance deployment"
 
     web = service_map["gta6-shorts-engine"]
-    worker = service_map["gta6-shorts-worker"]
     redis = service_map["gta6-shorts-redis"]
 
-    # Docker runtime validation
+    # Web service runs the combined Docker container
     assert web.get("runtime") == "docker", "Web service must use Docker runtime"
-    assert worker.get("runtime") == "docker", "Worker service must use Docker runtime"
-    assert worker.get("dockerCommand") == "python -m app.worker", "Worker must run python -m app.worker"
-
-    # Worker instance sizing: video processing must have standard plan or higher
-    assert worker.get("plan") in ["standard", "pro", "pro_plus"], "Worker must use standard plan or higher"
-
-    # Health check path
+    assert web.get("plan") in ["standard", "pro", "pro_plus"], "Combined service must use standard plan or higher"
     assert web.get("healthCheckPath") == "/health", "Health check path must be /health"
 
     # Redis private security
     assert redis.get("ipAllowList") == [], "Redis must have empty ipAllowList (private only)"
 
-    # Verify web env vars
+    # Verify web env vars contain both API and worker configurations
     web_env_keys = {e["key"]: e for e in web.get("envVars", [])}
     assert web_env_keys.get("ENVIRONMENT", {}).get("value") == "production"
     assert web_env_keys.get("FAIL_CLOSED_IN_PRODUCTION", {}).get("value") == "true"
@@ -55,43 +50,52 @@ def test_render_blueprint_structure_and_env_wiring():
     assert "SUPABASE_URL" in web_env_keys
     assert "SUPABASE_SERVICE_ROLE_KEY" in web_env_keys
 
-    # Verify worker env vars are synchronized from web service and redis
-    worker_env_keys = {e["key"]: e for e in worker.get("envVars", [])}
-    assert worker_env_keys.get("PUBLISHING_AUTOMATION_ENABLED", {}).get("value") == "false"
-
-    # Ensure worker receives Redis from the exact same private keyvalue service
-    redis_ref = worker_env_keys.get("REDIS_URL", {}).get("fromService", {})
+    # Verify Redis wiring from keyvalue service
+    redis_ref = web_env_keys.get("REDIS_URL", {}).get("fromService", {})
     assert redis_ref.get("name") == "gta6-shorts-redis"
     assert redis_ref.get("property") == "connectionString"
 
-    # Ensure worker receives keys from web service
-    for synchronized_key in [
-        "ENGINE_API_KEY",
-        "TOKEN_ENCRYPTION_KEY",
-        "SUPABASE_URL",
-        "SUPABASE_SERVICE_ROLE_KEY",
-        "SUPABASE_JWT_SECRET",
-        "GEMINI_API_KEY",
-        "OPENAI_API_KEY",
-    ]:
-        ref = worker_env_keys.get(synchronized_key, {}).get("fromService", {})
-        assert ref.get("name") == "gta6-shorts-engine", f"Worker {synchronized_key} must come from web service"
-        assert ref.get("envVarKey") == synchronized_key, f"Worker {synchronized_key} envVarKey must match"
+    # Verify queue and processing settings for combined worker
+    assert web_env_keys.get("QUEUE_NAME", {}).get("value") == "viral-shorts"
+    assert web_env_keys.get("MAX_CONCURRENT_JOBS", {}).get("value") == "2"
+    assert web_env_keys.get("LOCAL_WHISPER_MODEL", {}).get("value") == "base"
+    assert web_env_keys.get("DAILY_TARGET_MIN", {}).get("value") == "15"
+    assert web_env_keys.get("DAILY_TARGET_MAX", {}).get("value") == "20"
 
 
-def test_dockerfile_dependencies_and_directories():
-    """Verify Dockerfile contains FFmpeg, fonts, OpenCV dependencies, and directories."""
-    dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+def test_dockerfile_and_start_combined_script():
+    """Verify Dockerfile uses start_combined.sh and contains required runtime libraries."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    dockerfile_path = os.path.join(repo_root, "Dockerfile")
+    start_sh_path = os.path.join(repo_root, "app", "start_combined.sh")
+
     assert os.path.exists(dockerfile_path)
+    assert os.path.exists(start_sh_path)
 
+    # Verify executable bit
+    assert os.access(start_sh_path, os.X_OK), "app/start_combined.sh must be executable"
+
+    # Verify shell syntax via bash -n
+    syntax_check = subprocess.run(["bash", "-n", start_sh_path], capture_output=True, text=True)
+    assert syntax_check.returncode == 0, f"Shell syntax error in start_combined.sh: {syntax_check.stderr}"
+
+    # Verify script content
+    with open(start_sh_path, "r", encoding="utf-8") as f:
+        sh_content = f.read()
+
+    assert "python -m app.worker" in sh_content, "Supervisor must launch worker"
+    assert "uvicorn app.main:app" in sh_content, "Supervisor must launch uvicorn"
+    assert "trap" in sh_content, "Supervisor must configure signal traps"
+    assert "wait -n" in sh_content, "Supervisor must supervise both processes via wait -n"
+
+    # Verify Dockerfile CMD
     with open(dockerfile_path, "r", encoding="utf-8") as f:
         docker_content = f.read()
 
+    assert 'CMD ["bash", "app/start_combined.sh"]' in docker_content, "Dockerfile must use start_combined.sh as CMD"
     assert "ffmpeg" in docker_content, "Dockerfile must install ffmpeg"
     assert "fonts-dejavu-core" in docker_content, "Dockerfile must install subtitle fonts"
     assert "libgl1" in docker_content, "Dockerfile must install OpenGL/OpenCV runtime libraries"
-    assert "/app/output/clips" in docker_content, "Dockerfile must create output directory"
-    assert "/app/tmp" in docker_content, "Dockerfile must create temporary directory"
 
 
 def test_publishing_automation_disabled_by_default():

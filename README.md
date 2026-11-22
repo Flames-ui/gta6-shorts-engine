@@ -40,18 +40,25 @@ A scalable, secure, production-grade backend engine engineered for multi-categor
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 │                                Render Deployment Cloud                                  │
 │                                                                                         │
-│  ┌────────────────────────────────┐                 ┌────────────────────────────────┐  │
-│  │   gta6-shorts-engine (Web)     │                 │   gta6-shorts-worker (Worker)  │  │
-│  │   - FastAPI HTTP Server        │                 │   - Dedicated high-RAM/CPU    │  │
-│  │   - Pydantic v2 Validation     │                 │   - FFmpeg 8.x + Whisper       │  │
-│  │   - SSRF & Safe Host Filtering │                 │   - Gemini 2.5 Flash Highlights│  │
-│  │   - Rate Limiting & Auth Gates │                 │   - Vertical 9:16 Crop/Reframe │  │
-│  └───────────────┬────────────────┘                 └────────────────┬───────────────┘  │
-│                  │                                                   │                  │
-│                  │           ┌────────────────────────┐              │                  │
-│                  └──────────►│  Render Redis Queue    │◄─────────────┘                  │
-│                     Enqueue  │  (Redis RQ gta6_shorts)│   Dequeue & Process             │
-│                              └────────────────────────┘                                 │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │   gta6-shorts-engine (Single-Instance Combined Web + Worker Service)              │  │
+│  │   Supervised by app/start_combined.sh:                                            │  │
+│  │   ├─ Process 1: FastAPI HTTP Server (Uvicorn on 0.0.0.0:8000)                     │  │
+│  │   │  - REST API & Health Probes (/health, /health/ready, /health/live)            │  │
+│  │   │  - Pydantic v2 Validation, SSRF Defense, JWT & Tenant Isolation               │  │
+│  │   └─ Process 2: Redis RQ Worker (python -m app.worker on queue: viral-shorts)    │  │
+│  │      - FFmpeg Video Processing & 9:16 Vertical Cropping                           │  │
+│  │      - Local Whisper Audio Transcription & Gemini 2.5 Flash Highlights            │  │
+│  │      - Orphaned Job Recovery upon restart                                         │  │
+│  │   * NOTE: Video rendering, Whisper AI, and API traffic share CPU & RAM.           │  │
+│  └───────────────┬───────────────────────────────────────────────────┬───────────────┘  │
+│                  │ Enqueue Jobs                                      │ Dequeue & Run    │
+│                  ▼                                                   ▼                  │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │   gta6-shorts-redis (Private KeyValue Redis)                                      │  │
+│  │   - Redis RQ queue ('viral-shorts'), job deduplication & distributed locks        │  │
+│  │   - ipAllowList: [] (Private internal access only)                                │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────┬──────────────────────────────────────────────┘
                                            │
                                            ▼
@@ -205,27 +212,32 @@ Key tables provisioned with Row Level Security:
 
 ## 10. Render Cloud Deployment
 
-The repository includes a verified, production-ready `render.yaml` Blueprint configuring three linked Docker and Key-Value services:
+The repository includes a verified, cost-optimized `render.yaml` Blueprint configuring a **single-instance combined web and worker service** alongside a private Key-Value Redis database, completely avoiding the cost of a separate background worker service.
+
+> **CRITICAL RESOURCE NOTICE**:
+> This is a **single-instance, resource-constrained deployment**. The FastAPI web server and the Redis RQ background worker run inside the **same container**, sharing the exact same CPU cores and RAM allocations. Video rendering with FFmpeg, Whisper audio transcription, and incoming HTTP API traffic execute on this shared instance.
+> - **Do not claim production-scale capacity without empirical load testing.**
+> - `MAX_CONCURRENT_JOBS` is strictly constrained to `2` (or `1` on lower resource tiers) to prevent Out-Of-Memory (OOM) process termination during heavy FFmpeg filtering and subtitle burning.
+> - `PUBLISHING_AUTOMATION_ENABLED` defaults to `false` to ensure safe staged rollout without inadvertent public postings.
+
+---
 
 ### 1. Service Topology
-- **`gta6-shorts-engine` (Web Service)**:
+- **`gta6-shorts-engine` (Combined Web & Worker Service)**:
   - **Runtime**: Production Docker container (`Dockerfile`).
-  - **Instance Plan**: `standard` (or higher) with HTTP port 8000.
+  - **Supervisor**: `app/start_combined.sh` initiates and supervises two concurrent child processes:
+    1. `python -m app.worker`: Background worker listening on queue `viral-shorts`, performing orphaned job recovery on startup and handling video rendering.
+    2. `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`: REST API server handling web requests.
+  - **Supervision & Signal Handling**: The supervisor traps `SIGTERM` and `SIGINT`, forwards termination signals to both child processes for graceful shutdown, automatically terminates the surviving process if either child crashes, and propagates nonzero exit status back to Render for automatic restart.
+  - **Instance Plan**: `standard` (or higher) to provide adequate CPU and RAM for simultaneous HTTP traffic and FFmpeg video transcoding.
   - **Health Check**: Configured on `/health` (HTTP 200 with dependency statuses).
   - **Readiness Probes**: `/health/ready` (responds 503 if Supabase or Redis are unavailable in production).
   - **Liveness Probes**: `/health/live` (responds 200 if server process is running).
-  - **Responsibilities**: REST API endpoints, user authentication, tenant isolation, Supabase data persistence, signed media URL generation, and distributed task dispatching.
-
-- **`gta6-shorts-worker` (Background Worker)**:
-  - **Runtime**: Production Docker container (`Dockerfile`).
-  - **Instance Plan**: `standard` (or higher) to handle intensive FFmpeg rendering, Whisper audio transcription, OpenCV analysis, and video transcoding. **Never run on an undersized starter plan.**
-  - **Startup Command**: `python -m app.worker`.
-  - **Responsibilities**: Dequeues jobs from Redis, executes audio/video processing, runs Gemini/OpenAI highlight analysis, renders ASS subtitles, generates 9:16 vertical clips, uploads to private Supabase storage, and safely recovers orphaned `processing` jobs upon restart.
 
 - **`gta6-shorts-redis` (Private Redis / Key-Value)**:
   - **Type**: `keyvalue` (Private Redis instance).
   - **Access Control**: `ipAllowList: []` — completely private and unreachable from the public internet. Accessible only by internal Render services.
-  - **Connection**: Web and worker services automatically connect to the same private Redis using Render's `property: connectionString`.
+  - **Connection**: Web service connects automatically via Render's `property: connectionString`.
 
 ---
 
@@ -233,43 +245,43 @@ The repository includes a verified, production-ready `render.yaml` Blueprint con
 
 The table below details every environment variable configured in `render.yaml`, distinguishing values that Render or Blueprint manages automatically from secrets that **you must supply**:
 
-| Environment Variable | Target Services | Category / Origin | Description |
+| Environment Variable | Target Service | Category / Origin | Description |
 | :--- | :--- | :--- | :--- |
-| `ENVIRONMENT` | Web, Worker | Built-in | Set to `production` for strict fail-closed security. |
-| `FAIL_CLOSED_IN_PRODUCTION` | Web, Worker | Built-in | Set to `true` to reject unverified JWTs and enforce Supabase/Redis. |
-| `LOG_LEVEL` | Web, Worker | Built-in | Logging verbosity (`INFO`). |
-| `PORT` | Web | Built-in | Default web port (`8000`). |
-| `CORS_ORIGINS` | Web | Built-in | Allowed frontend origins (`https://lovable.dev,https://lovable.app`). |
-| `PUBLISHING_AUTOMATION_ENABLED` | Web, Worker | Safety Default | Default `false` during deployment testing to avoid accidental public posts. Set `true` only when ready to enable 24/7 autonomous publishing. |
-| `ENGINE_API_KEY` | Web (Generated) -> Worker (Sync) | **Render Auto-Generated** | 32-character cryptographically random server secret. Automatically shared with the worker. |
-| `ENGINE_API_KEY_PREVIOUS` | Web | Optional Secret | Kept for zero-downtime key rotation. |
-| `TOKEN_ENCRYPTION_KEY` | Web (Generated) -> Worker (Sync) | **Render Auto-Generated** | Encryption key used for AES token encryption at rest. Automatically shared with the worker. |
-| `ADMIN_USER_IDS` | Web | **User-Supplied** (Optional) | Comma-separated list of Supabase `user_id`s granted administrator privileges. |
-| `ADMIN_EMAILS` | Web | **User-Supplied** (Optional) | Comma-separated list of admin email addresses. |
-| `SUPABASE_URL` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Your Supabase project URL (`https://<project-ref>.supabase.co`). |
-| `SUPABASE_SERVICE_ROLE_KEY` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Your secret `service_role` key. Kept exclusively on the server, never exposed. |
-| `SUPABASE_JWT_SECRET` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Supabase Auth JWT secret used to cryptographically verify user tokens. |
-| `SUPABASE_STORAGE_BUCKET` | Web, Worker | Built-in | Name of private storage bucket (`shorts`). |
-| `REDIS_URL` | Web, Worker | **Render Key-Value (Sync)** | Private Redis connection string wired directly from `gta6-shorts-redis`. |
-| `QUEUE_NAME` | Web, Worker | Built-in | RQ queue name (`viral-shorts`). |
-| `MAX_CONCURRENT_JOBS` | Worker | Built-in | Worker concurrency ceiling (`2`). |
-| `JOB_TIMEOUT_SECONDS` | Worker | Built-in | Maximum execution timeout per video job (`1800` seconds / 30 min). |
-| `LLM_PROVIDER` | Web, Worker | Built-in | AI highlight provider (`gemini`). |
-| `GEMINI_API_KEY` | Web -> Worker (Sync) | **User-Supplied (Mandatory)** | Google Gemini API key for intelligent video highlight and caption detection. |
-| `GEMINI_MODEL` | Web, Worker | Built-in | Model version (`gemini-2.5-flash`). |
-| `OPENAI_API_KEY` | Web -> Worker (Sync) | **User-Supplied** (Optional) | OpenAI API key for secondary fallback. |
-| `OPENAI_MODEL` | Web, Worker | Built-in | OpenAI model (`gpt-4o-mini`). |
-| `BUFFER_CLIENT_ID` | Web -> Worker (Sync) | **User-Supplied** (For Buffer) | Buffer OAuth application Client ID. |
-| `BUFFER_CLIENT_SECRET` | Web -> Worker (Sync) | **User-Supplied** (For Buffer) | Buffer OAuth application Client Secret. |
-| `BUFFER_REDIRECT_URI` | Web -> Worker (Sync) | **User-Supplied** (For Buffer) | `https://<YOUR_RENDER_URL>/api/v1/publishing/buffer/callback`. |
-| `YOUTUBE_CLIENT_ID` | Web -> Worker (Sync) | **User-Supplied** (For YouTube) | Google Cloud OAuth Client ID for direct YouTube Shorts publishing. |
-| `YOUTUBE_CLIENT_SECRET` | Web -> Worker (Sync) | **User-Supplied** (For YouTube) | Google Cloud OAuth Client Secret. |
-| `YOUTUBE_REDIRECT_URI` | Web -> Worker (Sync) | **User-Supplied** (For YouTube) | Google OAuth callback URI. |
-| `LOCAL_WHISPER_MODEL` | Worker | Built-in | Local Whisper model size (`base`). |
-| `LOCAL_WHISPER_DEVICE` | Worker | Built-in | Whisper compute device (`cpu`). |
-| `OUTPUT_DIR` / `LOCAL_OUTPUT_DIR` | Web, Worker | Built-in | Local output path (`/app/output`). |
-| `TEMP_DIR` | Web, Worker | Built-in | Scratch directory (`/app/tmp`). |
-| `DAILY_TARGET_MIN` / `MAX` | Worker | Built-in | Autonomous daily clip generation quota (`15` to `20`). |
+| `ENVIRONMENT` | `gta6-shorts-engine` | Built-in | Set to `production` for strict fail-closed security. |
+| `FAIL_CLOSED_IN_PRODUCTION` | `gta6-shorts-engine` | Built-in | Set to `true` to reject unverified JWTs and enforce Supabase/Redis. |
+| `LOG_LEVEL` | `gta6-shorts-engine` | Built-in | Logging verbosity (`INFO`). |
+| `PORT` | `gta6-shorts-engine` | Built-in | Default web port (`8000`). |
+| `CORS_ORIGINS` | `gta6-shorts-engine` | Built-in | Allowed frontend origins (`https://lovable.dev,https://lovable.app`). |
+| `PUBLISHING_AUTOMATION_ENABLED` | `gta6-shorts-engine` | Safety Default | Default `false` during deployment testing to avoid accidental public posts. Set `true` only when ready to enable autonomous publishing. |
+| `ENGINE_API_KEY` | `gta6-shorts-engine` | **Render Auto-Generated** | 32-character cryptographically random server secret. |
+| `ENGINE_API_KEY_PREVIOUS` | `gta6-shorts-engine` | Optional Secret | Kept for zero-downtime key rotation. |
+| `TOKEN_ENCRYPTION_KEY` | `gta6-shorts-engine` | **Render Auto-Generated** | Encryption key used for AES token encryption at rest. |
+| `ADMIN_USER_IDS` | `gta6-shorts-engine` | **User-Supplied** (Optional) | Comma-separated list of Supabase `user_id`s granted administrator privileges. |
+| `ADMIN_EMAILS` | `gta6-shorts-engine` | **User-Supplied** (Optional) | Comma-separated list of admin email addresses. |
+| `SUPABASE_URL` | `gta6-shorts-engine` | **User-Supplied (Mandatory)** | Your Supabase project URL (`https://<project-ref>.supabase.co`). |
+| `SUPABASE_SERVICE_ROLE_KEY` | `gta6-shorts-engine` | **User-Supplied (Mandatory)** | Your secret `service_role` key. Kept exclusively on the server, never exposed. |
+| `SUPABASE_JWT_SECRET` | `gta6-shorts-engine` | **User-Supplied (Mandatory)** | Supabase Auth JWT secret used to cryptographically verify user tokens. |
+| `SUPABASE_STORAGE_BUCKET` | `gta6-shorts-engine` | Built-in | Name of private storage bucket (`shorts`). |
+| `REDIS_URL` | `gta6-shorts-engine` | **Render Key-Value (Sync)** | Private Redis connection string wired directly from `gta6-shorts-redis`. |
+| `QUEUE_NAME` | `gta6-shorts-engine` | Built-in | RQ queue name (`viral-shorts`). |
+| `MAX_CONCURRENT_JOBS` | `gta6-shorts-engine` | Built-in | Concurrency ceiling (`2`) to limit resource contention. |
+| `JOB_TIMEOUT_SECONDS` | `gta6-shorts-engine` | Built-in | Maximum execution timeout per video job (`1800` seconds / 30 min). |
+| `LLM_PROVIDER` | `gta6-shorts-engine` | Built-in | AI highlight provider (`gemini`). |
+| `GEMINI_API_KEY` | `gta6-shorts-engine` | **User-Supplied (Mandatory)** | Google Gemini API key for intelligent video highlight detection. |
+| `GEMINI_MODEL` | `gta6-shorts-engine` | Built-in | Model version (`gemini-2.5-flash`). |
+| `OPENAI_API_KEY` | `gta6-shorts-engine` | **User-Supplied** (Optional) | OpenAI API key for secondary fallback. |
+| `OPENAI_MODEL` | `gta6-shorts-engine` | Built-in | OpenAI model (`gpt-4o-mini`). |
+| `BUFFER_CLIENT_ID` | `gta6-shorts-engine` | **User-Supplied** (For Buffer) | Buffer OAuth application Client ID. |
+| `BUFFER_CLIENT_SECRET` | `gta6-shorts-engine` | **User-Supplied** (For Buffer) | Buffer OAuth application Client Secret. |
+| `BUFFER_REDIRECT_URI` | `gta6-shorts-engine` | **User-Supplied** (For Buffer) | `https://<YOUR_RENDER_URL>/api/v1/publishing/buffer/callback`. |
+| `YOUTUBE_CLIENT_ID` | `gta6-shorts-engine` | **User-Supplied** (For YouTube) | Google Cloud OAuth Client ID for direct YouTube Shorts publishing. |
+| `YOUTUBE_CLIENT_SECRET` | `gta6-shorts-engine` | **User-Supplied** (For YouTube) | Google Cloud OAuth Client Secret. |
+| `YOUTUBE_REDIRECT_URI` | `gta6-shorts-engine` | **User-Supplied** (For YouTube) | Google OAuth callback URI. |
+| `LOCAL_WHISPER_MODEL` | `gta6-shorts-engine` | Built-in | Local Whisper model size (`base`). |
+| `LOCAL_WHISPER_DEVICE` | `gta6-shorts-engine` | Built-in | Whisper compute device (`cpu`). |
+| `OUTPUT_DIR` / `LOCAL_OUTPUT_DIR` | `gta6-shorts-engine` | Built-in | Local output path (`/app/output`). |
+| `TEMP_DIR` | `gta6-shorts-engine` | Built-in | Scratch directory (`/app/tmp`). |
+| `DAILY_TARGET_MIN` / `MAX` | `gta6-shorts-engine` | Built-in | Autonomous daily clip generation quota (`15` to `20`). |
 
 ---
 
@@ -285,15 +297,12 @@ The table below details every environment variable configured in `render.yaml`, 
 4. Click **Apply**. Render will:
    - Provision the private `gta6-shorts-redis` Key-Value database.
    - Build and launch the `gta6-shorts-engine` Docker image.
-   - Build and launch the `gta6-shorts-worker` Docker container using `python -m app.worker`.
+   - Execute `CMD ["bash", "app/start_combined.sh"]` to start both the worker and FastAPI server.
 5. Once deployment completes, check the health endpoints:
    ```bash
-   curl -s https://<YOUR_RENDER_URL>/health | jq .
-   curl -s https://<YOUR_RENDER_URL>/health/ready | jq .
-   curl -s https://<YOUR_RENDER_URL>/health/live | jq .
+   curl -I https://<YOUR_RENDER_APP_URL>/health
+   curl -I https://<YOUR_RENDER_APP_URL>/health/ready
    ```
-
----
 
 ## 11. Lovable Dashboard Integration & API Contracts
 
