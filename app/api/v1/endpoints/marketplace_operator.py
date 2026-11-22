@@ -4,7 +4,7 @@ opportunity scoring, operator login flows, and action queue management.
 """
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ....services.browser_manager import browser_manager
@@ -271,30 +271,82 @@ def get_campaign_drive_assets(campaign_id: str, auth: AuthContext = Depends(veri
     }
 
 
+class RegisterDriveAssetPayload(BaseModel):
+    file_name: str
+    drive_file_id: Optional[str] = None
+    drive_url: Optional[str] = ""
+    mime_type: Optional[str] = "application/octet-stream"
+    content_base64: Optional[str] = None
+    permission_evidence: Optional[Dict[str, Any]] = None
+
+
 @router.post("/campaigns/{campaign_id}/drive-assets/register", response_model=Dict[str, Any])
 def register_campaign_drive_asset(
     campaign_id: str,
-    file_name: str = Query(...),
+    payload: Optional[RegisterDriveAssetPayload] = Body(None),
+    file_name: Optional[str] = Query(None),
     drive_url: str = Query(""),
     mime_type: str = Query("application/octet-stream"),
+    drive_file_id: Optional[str] = Query(None),
+    content_base64: Optional[str] = Query(None),
     auth: AuthContext = Depends(verify_api_key),
 ):
     """
     Registers and records an authorized campaign asset in an isolated campaign folder.
+    Fails closed on missing or fabricated content: requires genuine content_base64 or valid drive_file_id.
     """
     campaign = db.get_campaign(campaign_id)
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
 
-    dummy_payload = f"asset_content_{campaign_id}_{file_name}".encode("utf-8")
-    record = google_drive_asset_service.register_and_store_asset(
-        campaign_id=campaign_id,
-        file_name=file_name,
-        content_bytes=dummy_payload,
-        drive_url=drive_url,
-        mime_type=mime_type,
+    target_name = (payload.file_name if payload else None) or file_name
+    target_url = (payload.drive_url if payload else None) or drive_url
+    target_mime = (payload.mime_type if payload else None) or mime_type
+    target_file_id = (payload.drive_file_id if payload else None) or drive_file_id
+    target_b64 = (payload.content_base64 if payload else None) or content_base64
+    evidence = payload.permission_evidence if payload else None
+
+    if not target_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required file_name.")
+
+    # Genuine Google Drive download route
+    if target_file_id:
+        success, record, err = google_drive_asset_service.download_drive_file(
+            campaign_id=campaign_id,
+            file_id=target_file_id,
+            file_name=target_name,
+            mime_type=target_mime,
+            permission_evidence=evidence,
+        )
+        if not success:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to download Google Drive asset: {err}")
+        return record
+
+    # Genuine provided content bytes route
+    if target_b64:
+        import base64
+        try:
+            raw_bytes = base64.b64decode(target_b64)
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid base64 content: {e}")
+
+        if not raw_bytes or len(raw_bytes) == 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Asset content cannot be empty (0 bytes).")
+
+        record = google_drive_asset_service.register_and_store_asset(
+            campaign_id=campaign_id,
+            file_name=target_name,
+            content_bytes=raw_bytes,
+            drive_url=target_url,
+            mime_type=target_mime,
+            permission_evidence=evidence,
+        )
+        return record
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Cannot register asset without genuine content. Provide drive_file_id for Drive API download or content_base64 with verified asset bytes. Fabricated content is forbidden."
     )
-    return record
 
 
 @router.post("/candidates/quality-score", response_model=Dict[str, Any])

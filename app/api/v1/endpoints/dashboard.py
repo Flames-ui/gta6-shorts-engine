@@ -1,3 +1,5 @@
+import os
+from datetime import datetime, timezone
 """Dashboard overview statistics endpoint for Lovable frontend integration."""
 from fastapi import APIRouter, Depends
 from ....auth import AuthContext, verify_api_key
@@ -73,7 +75,8 @@ async def get_operator_overview(auth: AuthContext = Depends(verify_api_key)):
     session_status = content_rewards_operator.check_session_status()
 
     # 2. Campaigns breakdown
-    all_campaigns = db.list_campaigns(limit=500)
+    all_campaigns_raw = db.list_campaigns(limit=500)
+    all_campaigns = all_campaigns_raw[0] if isinstance(all_campaigns_raw, tuple) else (all_campaigns_raw or [])
     campaign_counts = {
         "discovered": len(all_campaigns),
         "eligible": sum(1 for c in all_campaigns if c.get("status") == "eligible"),
@@ -90,11 +93,14 @@ async def get_operator_overview(auth: AuthContext = Depends(verify_api_key)):
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_clips = sum(1 for c in clips if (c.get("created_at") or "").startswith(today_str))
 
+    analyzed_candidates_count = db.count_candidate_evaluations()
+    rejected_candidates_count = db.count_candidate_evaluations(verdict="reject")
+
     pipeline_counts = {
-        "candidate_moments_analyzed": max(len(clips) * 4, 12),
-        "candidate_moments_rejected": max(len(clips) * 2, 6),
+        "candidate_moments_analyzed": analyzed_candidates_count,
+        "candidate_moments_rejected": rejected_candidates_count,
         "clips_selected": len(clips),
-        "clips_rendered": sum(1 for c in clips if c.get("video_path") or c.get("storage_path")),
+        "clips_rendered": sum(1 for c in clips if (c.get("video_path") and os.path.isfile(c.get("video_path"))) or (c.get("storage_path") and os.path.isfile(c.get("storage_path")))),
         "clips_passing_quality_control": sum(1 for c in clips if c.get("status") in ("approved", "completed", "ready")),
         "clips_passing_compliance": sum(1 for c in clips if c.get("compliance_status") in ("compliant", "approved") or c.get("is_compliant")),
         "clips_awaiting_operator_approval": sum(1 for c in clips if c.get("publishing_status") in ("awaiting_approval", "pending_review")),

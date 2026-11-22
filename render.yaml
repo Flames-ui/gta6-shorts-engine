@@ -106,9 +106,9 @@ services:
       - key: TEMP_DIR
         value: /app/tmp
       - key: DAILY_TARGET_MIN
-        value: '15'
+        value: '3'
       - key: DAILY_TARGET_MAX
-        value: '20'
+        value: '5'
 
   # ---------------------------------------------------------------------------
   # Private Redis (Task Queue & Distributed Locks)

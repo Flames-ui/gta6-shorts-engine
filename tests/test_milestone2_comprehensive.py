@@ -295,7 +295,7 @@ def test_dual_gate_compliance_and_quality():
 
     res_pass = compliance_validator.validate_dual_gates(
         clip_id="clip_pass_1",
-        video_path=None,
+        video_path="/tmp/test_assets/valid_vertical_25s.mp4",
         campaign=campaign,
         candidate_metadata=good_meta,
         source=source,

@@ -9,7 +9,7 @@ from ....services.supabase_client import db
 router = APIRouter()
 
 
-@router.get("/", tags=["Health"])
+@router.get("/status", tags=["Health"])
 async def root():
     """Root service information and quick diagnostic."""
     return {

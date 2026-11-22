@@ -90,8 +90,8 @@ def test_quotas_endpoint(test_client, auth_headers):
     assert "total_scheduled" in data
     assert "target_min" in data
     assert "target_max" in data
-    assert data["target_min"] == 15
-    assert data["target_max"] == 20
+    assert data["target_min"] == 3
+    assert data["target_max"] == 5
 
 
 def test_audit_logs_creation_and_listing(test_client, auth_headers):

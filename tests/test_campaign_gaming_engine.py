@@ -338,14 +338,14 @@ def test_clip_duration_compliance_restrictions():
     assert short_res.submission_ready is False
     assert any("duration" in r.lower() for r in short_res.failure_reasons)
 
-    # Compliant (35s within [20, 50])
+    # Compliant (25s within [20, 50]) with real vertical video file
     valid_res = compliance_validator.validate_clip_compliance(
         clip_id="clip_valid",
-        video_path=None,
+        video_path="/tmp/test_assets/valid_vertical_25s.mp4",
         campaign=campaign,
         source=source,
         target_platform="tiktok",
-        clip_metadata={"duration": 35.0, "caption": "Insane moment in #GTA6", "hashtags": "#GTA6"},
+        clip_metadata={"duration": 25.0, "caption": "Insane moment in #GTA6", "hashtags": "#GTA6"},
     )
     assert valid_res.is_compliant is True
     assert valid_res.submission_ready is True

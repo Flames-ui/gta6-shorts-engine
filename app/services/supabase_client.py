@@ -425,6 +425,24 @@ class DatabaseClient:
                     updated_at TEXT
                 );
 
+                
+                CREATE TABLE IF NOT EXISTS candidate_evaluations (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL,
+                    campaign_id TEXT,
+                    source_id TEXT,
+                    start_time REAL,
+                    end_time REAL,
+                    duration REAL,
+                    quality_score REAL NOT NULL,
+                    tier TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    factor_breakdown TEXT,
+                    analysis_evidence TEXT,
+                    rejection_reasons TEXT,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
@@ -1992,7 +2010,7 @@ class DatabaseClient:
                 campaign_data.get('campaign_external_id'),
                 campaign_data['name'],
                 campaign_data.get('description'),
-                campaign_data['url'],
+                campaign_data.get('url', ''),
                 campaign_data.get('status', 'discovered'),
                 campaign_data.get('deadline'),
                 campaign_data.get('submission_deadline'),
@@ -2423,5 +2441,92 @@ class DatabaseClient:
         return self.get_clip_submission(submission_id)
 
 
-db = DatabaseClient()
 
+    # -------------------------------------------------------------------------
+    # Candidate Evaluations CRUD
+    # -------------------------------------------------------------------------
+    def record_candidate_evaluation(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        record.setdefault("created_at", now_iso)
+        if self.has_supabase:
+            try:
+                self.client.table("candidate_evaluations").insert(record).execute()
+                return record
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO candidate_evaluations
+                (id, candidate_id, campaign_id, source_id, start_time, end_time, duration,
+                 quality_score, tier, verdict, factor_breakdown, analysis_evidence, rejection_reasons, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.get("id"),
+                    record.get("candidate_id"),
+                    record.get("campaign_id"),
+                    record.get("source_id"),
+                    record.get("start_time"),
+                    record.get("end_time"),
+                    record.get("duration"),
+                    record.get("quality_score"),
+                    record.get("tier"),
+                    record.get("verdict"),
+                    record.get("factor_breakdown"),
+                    record.get("analysis_evidence"),
+                    record.get("rejection_reasons"),
+                    record.get("created_at"),
+                )
+            )
+        return record
+
+    def list_candidate_evaluations(self, campaign_id: Optional[str] = None, verdict: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            try:
+                q = self.client.table("candidate_evaluations").select("*").order("created_at", desc=True).limit(limit)
+                if campaign_id:
+                    q = q.eq("campaign_id", campaign_id)
+                if verdict:
+                    q = q.eq("verdict", verdict)
+                res = q.execute()
+                return res.data or []
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            clauses = []
+            params = []
+            if campaign_id:
+                clauses.append("campaign_id = ?")
+                params.append(campaign_id)
+            if verdict:
+                clauses.append("verdict = ?")
+                params.append(verdict)
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            params.append(limit)
+            rows = conn.execute(f"SELECT * FROM candidate_evaluations {where} ORDER BY created_at DESC LIMIT ?", params).fetchall()
+            return [dict(r) for r in rows]
+
+    def count_candidate_evaluations(self, verdict: Optional[str] = None) -> int:
+        if self.has_supabase:
+            try:
+                q = self.client.table("candidate_evaluations").select("id", count="exact")
+                if verdict:
+                    q = q.eq("verdict", verdict)
+                res = q.execute()
+                return res.count or 0
+            except Exception:
+                pass
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            if verdict:
+                row = conn.execute("SELECT COUNT(*) FROM candidate_evaluations WHERE verdict = ?", (verdict,)).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) FROM candidate_evaluations").fetchone()
+            return row[0] if row else 0
+
+
+db = DatabaseClient()

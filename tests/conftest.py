@@ -26,3 +26,20 @@ def client():
 @pytest.fixture
 def auth_headers():
     return {"X-API-Key": "test-secret-key-12345"}
+
+import subprocess
+import os
+
+# Ensure sample test assets exist for fail-closed media tests
+os.makedirs("/tmp/test_assets", exist_ok=True)
+sample_vid = "/tmp/test_assets/valid_vertical_25s.mp4"
+if not os.path.exists(sample_vid):
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=25:size=1080x1920:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=25",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        sample_vid
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

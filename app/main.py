@@ -104,20 +104,16 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(api_v1_router)
 
+from fastapi.staticfiles import StaticFiles
+
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", include_in_schema=False)
 async def serve_dashboard():
     """Serve GTA 6 Shorts Studio dashboard frontend."""
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
-
-@app.get("/static/{file_path:path}", include_in_schema=False)
-async def serve_static(file_path: str):
-    """Serve static frontend assets."""
-    static_root = os.path.realpath(STATIC_DIR)
-    target = os.path.realpath(os.path.join(static_root, file_path))
-    if os.path.commonpath([static_root, target]) != static_root:
-        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
-    if not os.path.isfile(target):
-        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
-    return FileResponse(target)
+    index_file = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file, media_type="text/html")
+    return JSONResponse(status_code=404, content={"detail": "Dashboard not found"})

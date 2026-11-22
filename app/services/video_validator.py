@@ -34,7 +34,7 @@ class VideoValidator:
         file_path: str,
         min_duration: float = 5.0,
         max_duration: float = 65.0,
-        target_aspect_ratio: float = 9.0 / 16.0,  # 0.5625
+        target_aspect_ratio: Optional[float] = 9.0 / 16.0,  # 0.5625
     ) -> VideoValidationResult:
         errors = []
         warnings = []
@@ -77,8 +77,8 @@ class VideoValidator:
             return VideoValidationResult(is_valid=False, errors=errors)
 
         aspect_ratio = width / height
-        # Allow +/- 8% tolerance for vertical 9:16
-        if abs(aspect_ratio - target_aspect_ratio) > 0.08:
+        # Check aspect ratio when target is specified
+        if target_aspect_ratio is not None and abs(aspect_ratio - target_aspect_ratio) > 0.08:
             errors.append(f"Incorrect aspect ratio: {aspect_ratio:.3f} (expected ~{target_aspect_ratio:.3f} for 9:16 vertical shorts).")
 
         # Duration check
@@ -88,16 +88,21 @@ class VideoValidator:
         elif fmt_dur > max_duration:
             errors.append(f"Duration exceeds platform limit: {fmt_dur:.1f}s (maximum is {max_duration}s).")
 
-        # Frame rate
-        fps = 30.0
-        r_frame_rate = v_stream.get("r_frame_rate", "30/1")
-        try:
-            num, den = r_frame_rate.split("/")
-            fps = float(num) / float(den)
-            if fps < 23.0:
-                warnings.append(f"Low frame rate detected: {fps:.1f} fps.")
-        except Exception:
-            pass
+        # Frame rate: fail-closed, no automatic pass
+        fps = 0.0
+        r_frame_rate = v_stream.get("r_frame_rate", "")
+        if r_frame_rate and "/" in r_frame_rate:
+            try:
+                num, den = r_frame_rate.split("/")
+                if float(den) > 0:
+                    fps = float(num) / float(den)
+            except Exception:
+                fps = 0.0
+
+        if fps <= 0.0:
+            errors.append("Invalid or unmeasurable frame rate in video stream.")
+        elif fps < 23.0:
+            warnings.append(f"Low frame rate detected: {fps:.1f} fps.")
 
         # Audio check
         has_audio = a_stream is not None

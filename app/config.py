@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     YOUTUBE_REDIRECT_URI: str = Field(default="", description="Google OAuth Redirect URI")
 
     # Production Limits & Scheduling
-    DAILY_TARGET_MIN: int = Field(default=15, description="Target minimum daily videos")
-    DAILY_TARGET_MAX: int = Field(default=20, description="Target maximum daily videos")
+    DAILY_TARGET_MIN: int = Field(default=3, description="Target minimum daily videos (Milestones 2.2 & 3: 3-5 target)")
+    DAILY_TARGET_MAX: int = Field(default=5, description="Target maximum daily videos (Milestones 2.2 & 3: 3-5 target)")
     MAX_VIDEO_DURATION_SECONDS: int = Field(default=7200, description="Maximum allowed input video duration")
     MAX_REQUEST_BODY_SIZE_BYTES: int = Field(default=104857600, description="Max request body size (100MB)")
 

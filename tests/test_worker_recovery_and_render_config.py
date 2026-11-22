@@ -59,8 +59,8 @@ def test_render_blueprint_structure_and_combined_env_wiring():
     assert web_env_keys.get("QUEUE_NAME", {}).get("value") == "viral-shorts"
     assert web_env_keys.get("MAX_CONCURRENT_JOBS", {}).get("value") == "2"
     assert web_env_keys.get("LOCAL_WHISPER_MODEL", {}).get("value") == "base"
-    assert web_env_keys.get("DAILY_TARGET_MIN", {}).get("value") == "15"
-    assert web_env_keys.get("DAILY_TARGET_MAX", {}).get("value") == "20"
+    assert web_env_keys.get("DAILY_TARGET_MIN", {}).get("value") == "3"
+    assert web_env_keys.get("DAILY_TARGET_MAX", {}).get("value") == "5"
 
 
 def test_dockerfile_and_start_combined_script():
@@ -176,7 +176,7 @@ def test_health_and_readiness_endpoints_behavior(client):
 def test_secrets_are_not_exposed_in_api_responses(client):
     """Verify sensitive environment variables and tokens are never returned in responses."""
     # Test root endpoint
-    root_res = client.get("/").json()
+    root_res = client.get("/status").json()
     root_str = str(root_res)
     assert settings.ENGINE_API_KEY not in root_str or not settings.ENGINE_API_KEY
     assert settings.SUPABASE_SERVICE_ROLE_KEY not in root_str or not settings.SUPABASE_SERVICE_ROLE_KEY
