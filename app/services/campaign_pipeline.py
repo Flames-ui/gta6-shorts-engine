@@ -286,6 +286,40 @@ class CampaignPipelineOrchestrator:
                 val_result = correction_res["validation"]
                 rendered_video_path = correction_res["video_path"]
 
+            # Append the promotional asset only after correction is complete. The final compliance
+            # inspection below must inspect the exact deliverable that may be published.
+            from .outro_service import outro_service
+            final_duration = outro_service.probe_video_duration(rendered_video_path)
+            outro_eligible, outro_reasons = outro_service.check_campaign_outro_eligibility(campaign, final_duration)
+            if outro_eligible:
+                appended_path = os.path.join(output_dir, f"{clip_id}_outro.mp4")
+                try:
+                    append_result = outro_service.append_outro(rendered_video_path, appended_path)
+                    if not append_result.get("success") or not append_result.get("outro_appended"):
+                        logger.error("Outro append was not confirmed for clip %s", clip_id)
+                        continue
+                    if not os.path.isfile(appended_path) or os.path.getsize(appended_path) == 0:
+                        logger.error("Outro append produced no usable asset for clip %s", clip_id)
+                        continue
+                    rendered_video_path = appended_path
+                    # Re-run both gates and technical inspection against the final video.
+                    val_result = compliance_validator.validate_dual_gates(
+                        clip_id=clip_id,
+                        video_path=rendered_video_path,
+                        campaign=campaign,
+                        source=source_record,
+                        editing_plan=plan,
+                        target_platform=target_platform,
+                        candidate_quality_score=cand.get("quality_score"),
+                        quality_evaluation=cand,
+                        clip_metadata={"caption": plan.get("exact_publication_caption")},
+                    )
+                except Exception as outro_err:
+                    logger.error("Outro append/final inspection failed for clip %s: %s", clip_id, outro_err)
+                    continue
+            else:
+                logger.debug("Outro injection skipped for campaign %s: %s", campaign_id, "; ".join(outro_reasons))
+
             # If clip passes both gates, assemble publication package
             if val_result.get("overall_approved"):
                 pkg = publication_package_service.build_publication_package(

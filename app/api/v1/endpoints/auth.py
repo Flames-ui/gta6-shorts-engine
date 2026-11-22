@@ -89,8 +89,11 @@ async def login_operator(
         max_age=30 * 86400,
     )
 
+    response.headers["X-CSRF-Token"] = csrf_token
     return {
         "status": "ok",
+        "authenticated": True,
+        "session_active": True,
         "user_id": user_id,
         "role": role,
         "csrf_token": csrf_token,
@@ -99,26 +102,31 @@ async def login_operator(
 
 
 @router.get("/session", response_model=Dict[str, Any])
-async def get_session(request: Request):
+async def get_session(request: Request, response: Response):
     """Retrieve active operator session context and CSRF token."""
     session_id = request.cookies.get("session_id")
     if not session_id:
-        return {"authenticated": False}
+        return {"authenticated": False, "session_active": False}
 
     sess = db.get_session(session_id)
     if not sess:
-        return {"authenticated": False}
+        return {"authenticated": False, "session_active": False}
 
     exp = sess.get("expires_at")
     if exp and exp < datetime.now(timezone.utc).isoformat():
         db.delete_session(session_id)
-        return {"authenticated": False}
+        return {"authenticated": False, "session_active": False}
+
+    csrf = sess.get("csrf_token")
+    if csrf:
+        response.headers["X-CSRF-Token"] = csrf
 
     return {
         "authenticated": True,
+        "session_active": True,
         "user_id": sess.get("user_id", "system_admin"),
         "role": sess.get("role", "admin"),
-        "csrf_token": sess.get("csrf_token"),
+        "csrf_token": csrf,
         "expires_at": sess.get("expires_at"),
     }
 

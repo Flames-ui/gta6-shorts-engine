@@ -252,6 +252,7 @@
       autonomous: { title: 'Autonomous Engine', sub: 'Automated 24/7 Content Scraping, Clipping & Publishing' },
       registry: { title: 'GTA 6 Registry & Feed', sub: 'Monitored Sources, RSS Feeds & Detected Viral Moments' },
       rewards: { title: 'Creator Rewards & Accounts', sub: 'Content Rewards, Vyro & Clipster Integration Management' },
+      integrations: { title: 'Integrations Hub', sub: 'Live status and diagnostics for connected services' },
       buffer: { title: 'Buffer Connection & Channels', sub: 'One-Time API Key GraphQL Integration (api.buffer.com)' },
       youtube: { title: 'YouTube Data API v3', sub: 'Google OAuth Channel Identity & Upload Authorization' },
       tiktok: { title: 'TikTok Connection & Capabilities', sub: 'Publishing Route, Aspect Ratio & 60s Duration Verification' },
@@ -349,11 +350,80 @@
     }
   }
 
+  async function loadIntegrationsHub() {
+    const grid = document.getElementById('integrations-grid');
+    const counter = document.getElementById('integrations-health-count');
+    const badge = document.getElementById('integrations-health-badge');
+    if (!grid) return;
+    try {
+      const response = await apiFetch('/api/v1/integrations/overview');
+      const list = response.integrations || [];
+      if (counter) counter.textContent = `${response.active} / ${response.total}`;
+      if (badge) {
+        badge.textContent = response.all_healthy ? 'ALL CONNECTED' : `${response.total - response.active} NEED ATTENTION`;
+        badge.className = `badge ${response.all_healthy ? 'badge-success' : 'badge-warning'}`;
+      }
+      grid.replaceChildren();
+      list.forEach((item) => {
+        const card = document.createElement('article');
+        card.className = 'card integration-card';
+        const body = document.createElement('div');
+        body.className = 'card-body';
+        const header = document.createElement('div');
+        header.className = 'integration-card-header';
+        const title = document.createElement('h3');
+        title.className = 'card-title';
+        title.textContent = item.name;
+        const stateBadge = document.createElement('span');
+        stateBadge.className = `badge ${item.connected ? 'badge-success' : 'badge-warning'}`;
+        stateBadge.textContent = item.connected ? 'CONNECTED' : 'NOT CONNECTED';
+        header.append(title, stateBadge);
+        const detail = document.createElement('pre');
+        detail.className = 'integration-details';
+        detail.textContent = JSON.stringify(item.details || {}, null, 2);
+        const testButton = document.createElement('button');
+        testButton.type = 'button';
+        testButton.className = 'btn btn-secondary btn-sm';
+        testButton.textContent = 'Test connection';
+        testButton.addEventListener('click', async () => {
+          testButton.disabled = true;
+          testButton.textContent = 'Testing…';
+          try {
+            const result = await apiFetch(`/api/v1/integrations/test/${encodeURIComponent(item.id)}`, { method: 'POST', body: {} });
+            showToast(result.message, result.success ? 'success' : 'warning');
+          } catch (err) {
+            showToast(`Connection check failed: ${err.message}`, 'error');
+          } finally {
+            testButton.disabled = false;
+            testButton.textContent = 'Test connection';
+          }
+        });
+        body.append(header, detail, testButton);
+        card.appendChild(body);
+        grid.appendChild(card);
+      });
+    } catch (err) {
+      if (counter) counter.textContent = 'Unavailable';
+      if (badge) { badge.textContent = 'STATUS UNAVAILABLE'; badge.className = 'badge badge-danger'; }
+      grid.replaceChildren();
+      const error = document.createElement('p');
+      error.className = 'card-body';
+      error.textContent = `Could not load integration status: ${err.message}`;
+      grid.appendChild(error);
+    }
+  }
+
+  function setupIntegrationsEvents() {
+    const refresh = document.getElementById('btn-refresh-integrations');
+    if (refresh) refresh.addEventListener('click', loadIntegrationsHub);
+  }
+
   function handleTabActivation(tabId) {
     if (tabId === 'overview') loadOverviewData();
     else if (tabId === 'autonomous') loadAutonomousData();
     else if (tabId === 'registry') { loadSources(); loadMoments(); }
     else if (tabId === 'rewards') loadMarketplacesData();
+    else if (tabId === 'integrations') loadIntegrationsHub();
     else if (tabId === 'buffer') loadBufferData();
     else if (tabId === 'youtube') loadYouTubeData();
     else if (tabId === 'tiktok') loadTikTokData();
@@ -1670,23 +1740,23 @@ async function loadClipTimeline(clipId) {
 
       if (toggle) toggle.checked = !!config.enabled;
       if (promo) promo.value = config.promo_text || '';
-      if (url) url.value = config.channel_url || '';
+      if (url) url.value = config.destination_url || config.channel_url || '';
       if (dur) dur.value = config.duration_seconds || 4.0;
 
+      const assetExists = !!config.asset_exists;
+      if (statusBadge) {
+        statusBadge.textContent = assetExists ? 'Outro Ready' : 'Asset Not Generated Yet';
+        statusBadge.className = assetExists ? 'badge badge-success' : 'badge badge-warning';
+      }
       if (previewVideo) {
-        previewVideo.src = '/api/v1/outro/preview';
         previewVideo.onerror = () => {
           if (statusBadge) {
-            statusBadge.textContent = 'Asset Not Generated Yet';
-            statusBadge.className = 'badge badge-warning';
+            statusBadge.textContent = 'Preview Unavailable';
+            statusBadge.className = 'badge badge-danger';
           }
         };
-        previewVideo.onloadeddata = () => {
-          if (statusBadge) {
-            statusBadge.textContent = 'Outro Ready';
-            statusBadge.className = 'badge badge-success';
-          }
-        };
+        if (assetExists) previewVideo.src = '/api/v1/outro/preview';
+        else { previewVideo.removeAttribute('src'); previewVideo.load(); }
       }
     } catch (err) {
       console.warn('Failed to load outro config:', err);
@@ -1701,10 +1771,12 @@ async function loadClipTimeline(clipId) {
       saveBtn.addEventListener('click', async () => {
         try {
           saveBtn.disabled = true;
+          const destinationUrl = (document.getElementById('outro-channel-url') || {}).value || '';
           const payload = {
             enabled: (document.getElementById('outro-enabled') || {}).checked || false,
             promo_text: (document.getElementById('outro-promo-text') || {}).value || '',
-            channel_url: (document.getElementById('outro-channel-url') || {}).value || '',
+            destination_url: destinationUrl,
+            channel_url: destinationUrl,
             duration_seconds: parseFloat((document.getElementById('outro-duration') || {}).value || 4.0)
           };
 
@@ -1727,9 +1799,16 @@ async function loadClipTimeline(clipId) {
         try {
           regenBtn.disabled = true;
           showToast('Synthesizing stickman outro video...', 'info');
-          const res = await apiFetch('/api/v1/outro/generate', { method: 'POST' });
+          const destinationUrl = (document.getElementById('outro-channel-url') || {}).value || '';
+          const payload = {
+            promo_text: (document.getElementById('outro-promo-text') || {}).value || '',
+            destination_url: destinationUrl,
+            channel_url: destinationUrl,
+            duration_seconds: parseFloat((document.getElementById('outro-duration') || {}).value || 4.0)
+          };
+          await apiFetch('/api/v1/outro/generate', { method: 'POST', body: payload });
           showToast('Outro video generated successfully', 'success');
-          loadOutroData();
+          await loadOutroData();
         } catch (err) {
           showToast('Generation failed: ' + err.message, 'error');
         } finally {
@@ -2141,7 +2220,6 @@ async function loadClipTimeline(clipId) {
   async function loadHealthStatus() {
     try {
       const health = await apiFetch('/api/v1/health');
-      const status = await apiFetch('/api/v1/status');
 
       const envElem = document.getElementById('health-env');
       const dbElem = document.getElementById('health-db');
@@ -2151,21 +2229,21 @@ async function loadClipTimeline(clipId) {
       const pulseDot = document.getElementById('sidebar-pulse-dot');
       const engineBadge = document.getElementById('engine-status-badge');
 
-      if (envElem) envElem.textContent = `${status.environment || 'production'} (API v1)`;
-      if (dbElem) dbElem.textContent = `${status.database_status || 'Connected & Migrated'}`;
-      if (workersElem) workersElem.textContent = `${status.active_workers || '1'} Worker Process Active`;
-      if (ffmpegElem) ffmpegElem.textContent = 'Operational (libx264, loudnorm -14 LUFS, ASS subtitle burner)';
+      if (envElem) envElem.textContent = `${health.environment || 'unknown'} (API v1)`;
+      if (dbElem) dbElem.textContent = health.supabase || 'Unknown';
+      if (workersElem) workersElem.textContent = `${health.workers_online || 0} workers online (Redis: ${health.redis || 'unknown'})`;
+      if (ffmpegElem) ffmpegElem.textContent = health.ffmpeg_available ? 'Available on server' : 'Not available on server';
 
       if (apiBadge) {
-        apiBadge.textContent = 'ONLINE';
-        apiBadge.className = 'badge badge-success';
+        apiBadge.textContent = health.status === 'healthy' ? 'ONLINE' : 'DEGRADED';
+        apiBadge.className = `badge ${health.status === 'healthy' ? 'badge-success' : 'badge-warning'}`;
       }
       if (pulseDot) {
         pulseDot.className = 'pulse-dot';
       }
       if (engineBadge) {
-        engineBadge.textContent = 'ONLINE';
-        engineBadge.className = 'badge badge-success';
+        engineBadge.textContent = health.status === 'healthy' ? 'ONLINE' : 'DEGRADED';
+        engineBadge.className = `badge ${health.status === 'healthy' ? 'badge-success' : 'badge-warning'}`;
       }
     } catch (err) {
       console.warn('Health check failed:', err);
@@ -2740,6 +2818,7 @@ async function loadClipTimeline(clipId) {
 
     // 9. Health Tab
     setupHealthEvents();
+    setupIntegrationsEvents();
 
     // 9b. Buffer, YouTube & System Integration Tabs
     setupBufferEvents();

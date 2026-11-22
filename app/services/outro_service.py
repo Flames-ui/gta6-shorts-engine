@@ -1,11 +1,13 @@
 """Configurable Talking-Stickman Promotional Outro Service."""
+import hashlib
 import json
 import logging
 import os
 import shutil
 import subprocess
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -25,8 +27,11 @@ class OutroConfig(BaseModel):
     outro_path: str = ""
     promo_text: str = DEFAULT_PROMO_TEXT
     destination_url: str = DEFAULT_DESTINATION_URL
+    channel_url: Optional[str] = None
     duration_seconds: float = Field(default=4.0, ge=1.0, le=10.0)
     qr_code_enabled: bool = False
+    asset_exists: bool = False
+    asset_metadata: Dict[str, Any] = Field(default_factory=dict)
     updated_at: Optional[str] = None
 
 
@@ -39,16 +44,136 @@ class OutroService:
 
     def get_config(self) -> OutroConfig:
         """Fetch active outro settings from persistent storage."""
-        data = db.get_outro_settings()
+        data = dict(db.get_outro_settings())
+        path = data.get("outro_path")
+        exists = bool(path and os.path.isfile(path) and os.path.getsize(path) > 0)
+        data["asset_exists"] = exists
+        metadata = {}
+        if exists:
+            try:
+                with open(f"{path}.metadata.json", "r", encoding="utf-8") as metadata_file:
+                    metadata = json.load(metadata_file)
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+        data["asset_metadata"] = metadata
+        dest = data.get("destination_url") or ""
+        if not data.get("channel_url"):
+            data["channel_url"] = dest
         return OutroConfig(**data)
 
     def update_config(self, updates: Dict[str, Any]) -> OutroConfig:
         """Update active outro configuration."""
         current = self.get_config().model_dump()
+        if "channel_url" in updates and not updates.get("destination_url"):
+            updates["destination_url"] = updates["channel_url"]
         current.update(updates)
         current["updated_at"] = datetime.now(timezone.utc).isoformat()
-        saved = db.save_outro_settings(current)
-        return OutroConfig(**saved)
+        # Keep API-only aliases and filesystem metadata out of the persisted database row.
+        persisted = {
+            key: current.get(key)
+            for key in ("id", "enabled", "outro_path", "promo_text", "destination_url", "duration_seconds", "qr_code_enabled", "updated_at")
+        }
+        saved = db.save_outro_settings(persisted)
+        saved["channel_url"] = saved.get("destination_url", "")
+        return self.get_config()
+
+    def check_campaign_outro_eligibility(
+        self,
+        campaign: Dict[str, Any],
+        current_duration: float = 0.0,
+    ) -> Tuple[bool, List[str]]:
+        """
+        Evaluate Section 19.D rules before injecting stickman outro into a campaign video.
+        Fails closed: returns (eligible: bool, reasons: List[str]).
+        Verifies:
+        - Outro enabled globally and asset exists.
+        - Campaign permits promotional outros.
+        - Campaign permits external links / destination URLs.
+        - Campaign permits WhatsApp promotion (if promo text or URL mentions WhatsApp).
+        - Branding requirements are satisfied (e.g. no exclusive brand prohibitions).
+        - Total duration (current + outro) <= campaign max_duration and <= 60.0s.
+        """
+        reasons = []
+        cfg = self.get_config()
+        if not cfg.enabled:
+            return False, ["Outro injection is disabled globally in Outro Studio."]
+
+        if not cfg.outro_path or not os.path.isfile(cfg.outro_path) or os.path.getsize(cfg.outro_path) == 0:
+            return False, ["Outro asset does not exist on disk; synthesis required before injection."]
+
+        rules_value = campaign.get("raw_rules") or campaign.get("rules") or ""
+        raw_rules = rules_value.lower() if isinstance(rules_value, str) else json.dumps(rules_value, sort_keys=True).lower()
+        title = str(campaign.get("title") or "").lower()
+        prohibited = [str(p).lower() for p in (campaign.get("prohibited_editing_techniques") or [])]
+        disqualifications = [str(d).lower() for d in (campaign.get("disqualification_reasons") or [])]
+        combined_rules = f"{raw_rules} {title} {' '.join(prohibited)} {' '.join(disqualifications)}"
+
+        # Permissions must be affirmative. Missing/ambiguous campaign language fails closed.
+        promo_allowed = bool(campaign.get("promotional_outro_allowed")) or any(
+            marker in combined_rules for marker in (
+                "promotional outro permitted", "promotional outros permitted",
+                "promotional outro allowed", "promotional outros allowed",
+                "promotional cta permitted", "promotional cta allowed",
+            )
+        )
+        if not promo_allowed:
+            reasons.append("Campaign does not explicitly permit promotional outros.")
+
+        if any(marker in combined_rules for marker in (
+            "no outro", "no outros", "no promotion", "no promotional outro",
+            "no self-promo", "no self promo", "no external promo", "no 3rd party promo",
+            "no third party promo", "clean video only", "no external cta",
+        )):
+            reasons.append("Campaign explicitly prohibits promotional outro or CTA content.")
+
+        is_link_promo = bool(cfg.destination_url and cfg.destination_url.strip())
+        if is_link_promo:
+            from urllib.parse import urlparse
+            parsed_destination = urlparse(cfg.destination_url.strip())
+            if parsed_destination.scheme not in ("https", "http") or not parsed_destination.netloc:
+                reasons.append("Configured destination link is not a valid HTTP(S) URL.")
+            link_allowed = bool(campaign.get("external_links_allowed")) or any(
+                marker in combined_rules for marker in (
+                    "external links permitted", "external links allowed", "external urls permitted",
+                    "external urls allowed", "destination links permitted", "destination links allowed",
+                )
+            )
+            if not link_allowed:
+                reasons.append("Campaign does not explicitly permit external links.")
+            if any(marker in combined_rules for marker in ("no external links", "no links", "no urls", "no website links", "no external urls")):
+                reasons.append("Campaign explicitly prohibits external links.")
+
+        is_whatsapp = "whatsapp" in (cfg.promo_text or "").lower() or "whatsapp" in (cfg.destination_url or "").lower()
+        if is_whatsapp:
+            whatsapp_allowed = bool(campaign.get("whatsapp_promotion_allowed")) or any(
+                marker in combined_rules for marker in (
+                    "whatsapp promotion permitted", "whatsapp promotions permitted",
+                    "whatsapp promotion allowed", "whatsapp promotions allowed",
+                    "whatsapp links permitted", "whatsapp links allowed",
+                )
+            )
+            if not whatsapp_allowed:
+                reasons.append("Campaign does not explicitly permit WhatsApp promotion.")
+            if any(marker in combined_rules for marker in ("no whatsapp", "no chat links", "no messaging links", "only official links")):
+                reasons.append("Campaign explicitly prohibits WhatsApp or messaging promotion.")
+
+        # 4. Check branding requirements
+        if campaign.get("requires_exclusive_branding") or "exclusive branding" in combined_rules:
+            reasons.append("Campaign requires exclusive brand assets; third-party promotional outros prohibited.")
+
+        # 5. Check duration compliance
+        max_campaign_dur = float(campaign.get("max_clip_duration_seconds") or 60.0)
+        max_allowed = min(max_campaign_dur, 60.0)
+        asset_duration = self.probe_video_duration(cfg.outro_path)
+        if asset_duration <= 0:
+            reasons.append("Generated outro duration could not be verified.")
+            asset_duration = cfg.duration_seconds
+        projected_duration = current_duration + asset_duration
+        if projected_duration > max_allowed:
+            reasons.append(f"Projected duration {projected_duration:.1f}s exceeds maximum allowed ({max_allowed:.1f}s).")
+
+        is_eligible = len(reasons) == 0
+        return is_eligible, reasons
 
     def generate_stickman_outro(
         self,
@@ -154,6 +279,28 @@ class OutroService:
             except Exception:
                 pass
 
+        digest = hashlib.sha256()
+        with open(target_path, "rb") as generated_file:
+            for chunk in iter(lambda: generated_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", target_path],
+            capture_output=True, text=True, check=True,
+        )
+        streams = json.loads(probe.stdout).get("streams", [])
+        dimensions = {"width": streams[0].get("width"), "height": streams[0].get("height")} if streams else {}
+        metadata = {
+            "asset_id": str(uuid.uuid4()),
+            "file_path": target_path,
+            "duration_seconds": self.probe_video_duration(target_path),
+            "dimensions": dimensions,
+            "sha256": digest.hexdigest(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "configuration": {"promo_text": promo_text or DEFAULT_PROMO_TEXT, "destination_url": destination_url or "", "duration_seconds": duration},
+            "generation_status": "generated",
+        }
+        with open(f"{target_path}.metadata.json", "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata, metadata_file, indent=2)
         logger.info("Generated high-quality talking stickman outro at %s (%0.1fs)", target_path, duration)
         return target_path
 

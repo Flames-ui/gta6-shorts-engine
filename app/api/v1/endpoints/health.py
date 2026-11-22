@@ -1,5 +1,6 @@
 """Health and readiness check endpoints for Render and monitoring."""
 from datetime import datetime, timezone
+import shutil
 from fastapi import APIRouter, Response, status
 from ....config import settings
 from ....queue import queue_manager
@@ -52,6 +53,8 @@ async def health_check():
         timestamp=datetime.now(timezone.utc).isoformat(),
         redis=redis_status,
         supabase=supabase_status,
+        workers_online=queue_manager.get_stats().get("workers_online", 0),
+        ffmpeg_available=bool(shutil.which("ffmpeg")),
     )
 
 

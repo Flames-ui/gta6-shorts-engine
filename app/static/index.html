@@ -66,6 +66,12 @@
               <span class="nav-text">Creator Rewards & Accounts</span>
             </a>
           </li>
+          <li class="nav-item" data-tab="integrations">
+            <a class="nav-link" href="#integrations">
+              <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="m8.7 10.7 6.6-3.4M8.7 13.3l6.6 3.4"></path></svg></span>
+              <span class="nav-text">Integrations Hub</span>
+            </a>
+          </li>
           <li class="nav-item" data-tab="buffer">
             <a class="nav-link" href="#buffer">
               <span class="nav-icon">
@@ -811,6 +817,19 @@
         <!-- ================================================================= -->
         <!-- TAB 4: STICKMAN OUTRO STUDIO                                      -->
         <!-- ================================================================= -->
+        <section id="tab-integrations" class="tab-section">
+          <div class="panel-header" style="margin-bottom: 24px;">
+            <div><h2 class="panel-title">Integrations Hub</h2><p class="panel-subtitle">Live connectivity status and direct diagnostic checks for connected services</p></div>
+            <button class="btn btn-secondary" id="btn-refresh-integrations">Refresh All</button>
+          </div>
+          <div class="card" style="margin-bottom:20px;"><div class="card-body integration-summary">
+            <div><strong id="integrations-health-count">Checking…</strong><span class="field-hint"> verified connections</span></div>
+            <span class="badge badge-info" id="integrations-health-badge">CHECKING</span>
+          </div></div>
+          <div class="integration-grid" id="integrations-grid" aria-live="polite"><div class="card"><div class="card-body">Loading integration status…</div></div></div>
+          <p class="field-hint" style="margin-top:16px;">A configured credential is not proof of provider access. Use “Test connection” to run a live check where supported.</p>
+        </section>
+
         <section id="tab-outro" class="tab-section">
           <div class="outro-grid">
             <div class="outro-preview-column">

@@ -82,7 +82,7 @@ async def security_middleware(request: Request, call_next):
 
     # Rate limiting on API paths (exempting load balancer health probes and documentation)
     path = request.url.path
-    if not (path.startswith("/health") or path.startswith("/docs") or path.startswith("/openapi") or path.startswith("/redoc")):
+    if not (path.startswith("/health") or path.startswith("/api/v1/health") or path.startswith("/docs") or path.startswith("/openapi") or path.startswith("/redoc")):
         auth_header = request.headers.get("X-API-Key") or request.headers.get("Authorization", "")
         client_ip = request.client.host if request.client else "unknown"
         rate_key = f"{client_ip}:{auth_header[:16]}"
@@ -114,6 +114,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key", "Accept", "X-CSRF-Token"],
+    expose_headers=["X-CSRF-Token", "Content-Length", "Retry-After"],
     max_age=600,
 )
 

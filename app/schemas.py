@@ -357,6 +357,8 @@ class HealthResponse(BaseModel):
     timestamp: str
     redis: str
     supabase: str
+    workers_online: int = 0
+    ffmpeg_available: bool = False
 
 
 class AuthMeResponse(BaseModel):
