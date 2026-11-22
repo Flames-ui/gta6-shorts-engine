@@ -572,6 +572,32 @@ class DatabaseClient:
                 conn.execute("ALTER TABLE publishing_queue ADD COLUMN privacy_status TEXT DEFAULT 'private'")
             except Exception:
                 pass
+            for column_def in (
+                "youtube_video_id TEXT",
+                "channel_title TEXT",
+                "thumbnail_url TEXT",
+                "published_at TEXT",
+                "availability TEXT",
+                "metadata_status TEXT DEFAULT 'pending'",
+                "metadata_error TEXT",
+                "metadata_checked_at TEXT",
+                "media_access_method TEXT",
+                "media_status TEXT DEFAULT 'awaiting_authorized_media'",
+                "media_error TEXT",
+                "media_sha256 TEXT",
+                "media_bytes INTEGER",
+                "media_probe TEXT DEFAULT '{}'",
+                "media_checked_at TEXT",
+                "analysis_status TEXT DEFAULT 'not_started'",
+                "analysis_reason TEXT",
+                "analysis_checked_at TEXT",
+                "analysis_candidates TEXT DEFAULT '[]'",
+                "qualifying_moment_count INTEGER DEFAULT 0",
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE discovered_content ADD COLUMN {column_def}")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     # -------------------------------------------------------------------------
     # Jobs CRUD
@@ -2112,6 +2138,59 @@ class DatabaseClient:
                 params + [limit],
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # -------------------------------------------------------------------------
+    # Discovered content: metadata, media and analysis pipeline state
+    # -------------------------------------------------------------------------
+    _PIPELINE_COLUMNS = frozenset({
+        "title", "creator_name", "duration_seconds", "media_url", "youtube_video_id", "channel_title",
+        "thumbnail_url", "published_at", "availability", "metadata_status", "metadata_error",
+        "metadata_checked_at", "media_access_method", "media_status", "media_error", "media_sha256",
+        "media_bytes", "media_probe", "media_checked_at", "analysis_status", "analysis_reason",
+        "analysis_checked_at", "analysis_candidates", "qualifying_moment_count",
+    })
+
+    @staticmethod
+    def _decode_discovered_row(item: Dict[str, Any]) -> Dict[str, Any]:
+        for key, default in (("media_probe", {}), ("analysis_candidates", [])):
+            raw = item.get(key)
+            if isinstance(raw, str):
+                try:
+                    item[key] = json.loads(raw) if raw else default
+                except ValueError:
+                    item[key] = default
+            elif raw is None:
+                item[key] = default
+        item["is_processed"] = bool(item.get("is_processed"))
+        return item
+
+    def get_discovered_content(self, item_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table("discovered_content").select("*").eq("id", item_id).limit(1).execute()
+            return res.data[0] if res.data else None
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM discovered_content WHERE id = ?", (item_id,)).fetchone()
+        return self._decode_discovered_row(dict(row)) if row else None
+
+    def update_discovered_content(self, item_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Write pipeline state only. Unknown columns are rejected so rights and identity fields stay untouched."""
+        unknown = set(updates) - self._PIPELINE_COLUMNS
+        if unknown:
+            raise ValueError(f"Not a discovery pipeline column: {sorted(unknown)}")
+        if not updates:
+            return self.get_discovered_content(item_id)
+        if self.has_supabase:
+            res = self.client.table("discovered_content").update(updates).eq("id", item_id).execute()
+            return res.data[0] if res.data else None
+        params = {
+            key: json.dumps(value) if isinstance(value, (dict, list)) else value
+            for key, value in updates.items()
+        }
+        assignments = ", ".join(f"{key} = ?" for key in params)
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.execute(f"UPDATE discovered_content SET {assignments} WHERE id = ?", [*params.values(), item_id])
+        return self.get_discovered_content(item_id)
 
     def get_discovered_moment(self, moment_id: str) -> Optional[Dict[str, Any]]:
         if self.has_supabase:

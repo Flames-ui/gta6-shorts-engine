@@ -331,6 +331,10 @@ async def get_discovery_feed(
             rights_status=it.get("rights_status", "pending_verification"),
             discovery_time=it.get("discovery_time") or datetime.now(timezone.utc).isoformat(),
             is_processed=bool(it.get("is_processed", False)),
+            metadata_status=it.get("metadata_status"),
+            media_status=it.get("media_status"),
+            analysis_status=it.get("analysis_status"),
+            qualifying_moment_count=it.get("qualifying_moment_count"),
         ))
 
     return response_items
@@ -551,3 +555,64 @@ async def approve_gta6_moment(
 
     gta_registry.approve_moment(moment_id)
     return {"status": "candidate_approved", "moment_id": moment_id, "produced": False}
+
+
+# -------------------------------------------------------------------------
+# Discovered content pipeline: metadata, authorized media, moment analysis
+# -------------------------------------------------------------------------
+from ....services.discovery import media_pipeline as _media_pipeline
+
+
+class DiscoveredMediaRequest(BaseModel):
+    media_url: str = Field(min_length=8, max_length=2000, description="https file provided by the rights holder")
+
+
+def _load_item_for(item_id: str, auth: AuthContext) -> dict:
+    item = db.get_discovered_content(item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Discovered item {item_id} not found")
+    enforce_resource_ownership(item.get("user_id"), auth, "discovered item")
+    return item
+
+
+@router.get("/items/{item_id}")
+def get_discovered_item(item_id: str, auth: AuthContext = Depends(verify_api_key)):
+    """Return one discovered item with its metadata, media and analysis state."""
+    item = _load_item_for(item_id, auth)
+    return {"item": item}
+
+
+@router.post("/items/{item_id}/resolve-metadata")
+def resolve_item_metadata(item_id: str, auth: AuthContext = Depends(verify_api_key)):
+    """Resolve YouTube title, channel, thumbnail, duration and availability through the official Data API."""
+    require_admin(auth)
+    _load_item_for(item_id, auth)
+    return _media_pipeline.resolve_metadata(item_id)
+
+
+@router.post("/items/{item_id}/media")
+def ingest_item_media(
+    item_id: str,
+    payload: DiscoveredMediaRequest,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Download and validate footage from an authorized https URL. Platform video URLs are refused."""
+    require_admin(auth)
+    _load_item_for(item_id, auth)
+    result = _media_pipeline.ingest_media(item_id, media_url=payload.media_url)
+    if result["media_status"] == "validated":
+        return result
+    code = 422 if result["media_status"] in ("failed", "awaiting_authorized_media") else 403
+    raise HTTPException(status_code=code, detail=result)
+
+
+@router.post("/items/{item_id}/analyze")
+def analyze_item_moments(item_id: str, auth: AuthContext = Depends(verify_api_key)):
+    """Measure motion and audio on validated footage and score candidate windows. Never renders."""
+    require_admin(auth)
+    _load_item_for(item_id, auth)
+    result = _media_pipeline.analyze_item(item_id)
+    if result["analysis_status"] == "failed":
+        raise HTTPException(status_code=422, detail=result)
+    return result
+

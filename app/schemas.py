@@ -320,6 +320,10 @@ class DiscoveredItemResponse(BaseModel):
     rights_status: str
     discovery_time: str
     is_processed: bool = False
+    metadata_status: Optional[str] = None
+    media_status: Optional[str] = None
+    analysis_status: Optional[str] = None
+    qualifying_moment_count: Optional[int] = None
 
 
 # -----------------------------------------------------------------------------
