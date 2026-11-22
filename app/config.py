@@ -17,6 +17,15 @@ class Settings(BaseSettings):
     ENGINE_API_KEY: str = Field(default="", description="Secret API key required for /api/v1/ protected endpoints")
     ENGINE_API_KEY_PREVIOUS: str = Field(default="", description="Previous key for graceful rotation")
     FAIL_CLOSED_IN_PRODUCTION: bool = Field(default=True, description="Enforce strict authentication in production")
+    STRICT_CAMPAIGN_GATE_TEST: bool = Field(default=False)
+    ENFORCE_CAMPAIGN_GATE: bool = Field(
+        default=True,
+        description="Enforce strict campaign eligibility gate: No campaign, no clipping. Disallow direct clipping requests without an approved campaign."
+    )
+    DEFAULT_MONTHLY_EARNINGS_TARGET: float = Field(
+        default=500.0,
+        description="Target monthly earnings in USD for clipping operations"
+    )
     PUBLISHING_AUTOMATION_ENABLED: bool = Field(
         default=False,
         description="Enable automated background publishing to external platforms. Must remain false during deployment testing to prevent unintended public posts."

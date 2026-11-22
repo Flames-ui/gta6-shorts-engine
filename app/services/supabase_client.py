@@ -320,6 +320,107 @@ class DatabaseClient:
                     created_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    id TEXT PRIMARY KEY,
+                    marketplace_id TEXT DEFAULT "content_rewards",
+                    marketplace_name TEXT DEFAULT "Content Rewards",
+                    campaign_external_id TEXT,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    url TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT "discovered",
+                    deadline TEXT,
+                    submission_deadline TEXT,
+                    accepted_platforms TEXT DEFAULT "[]",
+                    eligible_games TEXT DEFAULT "[]",
+                    content_categories TEXT DEFAULT "[]",
+                    required_hashtags TEXT DEFAULT "[]",
+                    required_mentions TEXT DEFAULT "[]",
+                    required_captions TEXT,
+                    min_clip_duration_seconds INTEGER DEFAULT 15,
+                    max_clip_duration_seconds INTEGER DEFAULT 60,
+                    resolution_requirements TEXT DEFAULT "1080x1920",
+                    aspect_ratio TEXT DEFAULT "9:16",
+                    reward_model TEXT DEFAULT "cpm",
+                    payout_amount REAL DEFAULT 0.0,
+                    cpm REAL DEFAULT 0.0,
+                    reward_per_view REAL DEFAULT 0.0,
+                    view_qualification_rules TEXT DEFAULT "{}",
+                    max_eligible_views INTEGER DEFAULT 0,
+                    max_payout_per_clip REAL DEFAULT 0.0,
+                    geographic_eligibility TEXT DEFAULT "[]",
+                    account_eligibility TEXT DEFAULT "{}",
+                    source_video_requirements TEXT,
+                    content_restrictions TEXT DEFAULT "[]",
+                    prohibited_editing_techniques TEXT DEFAULT "[]",
+                    required_attribution TEXT,
+                    submission_instructions TEXT,
+                    raw_rules TEXT NOT NULL,
+                    operator_approved INTEGER DEFAULT 0,
+                    rejection_reason TEXT,
+                    review_notes TEXT,
+                    ambiguities TEXT DEFAULT "[]",
+                    date_last_verified TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS campaign_sources (
+                    id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    original_creator TEXT,
+                    source_type TEXT NOT NULL,
+                    permission_evidence TEXT NOT NULL,
+                    allowed_derivative_uses TEXT DEFAULT "[]",
+                    authorized_platforms TEXT DEFAULT "[]",
+                    permission_expiry TEXT,
+                    source_verification_status TEXT DEFAULT "pending_verification",
+                    verified_by TEXT,
+                    verified_at TEXT,
+                    rejection_reason TEXT,
+                    notes TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS campaign_clip_compliance (
+                    id TEXT PRIMARY KEY,
+                    clip_id TEXT NOT NULL UNIQUE,
+                    campaign_id TEXT NOT NULL,
+                    source_id TEXT,
+                    job_id TEXT,
+                    target_platform TEXT NOT NULL,
+                    compliance_status TEXT NOT NULL,
+                    compliance_results TEXT DEFAULT "{}",
+                    submission_ready INTEGER DEFAULT 0,
+                    failure_reasons TEXT DEFAULT "[]",
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS clip_submissions (
+                    id TEXT PRIMARY KEY,
+                    clip_id TEXT NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    submitted_at TEXT NOT NULL,
+                    submission_url TEXT,
+                    submission_post_id TEXT,
+                    submission_evidence TEXT DEFAULT "{}",
+                    status TEXT NOT NULL DEFAULT "submitted",
+                    eligible_views INTEGER DEFAULT 0,
+                    pending_rewards REAL DEFAULT 0.0,
+                    approved_rewards REAL DEFAULT 0.0,
+                    rejected_rewards REAL DEFAULT 0.0,
+                    withdrawable_earnings REAL DEFAULT 0.0,
+                    rejection_reason TEXT,
+                    last_verified_at TEXT,
+                    operator_notes TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
@@ -1832,6 +1933,482 @@ class DatabaseClient:
         with self.lock, sqlite3.connect(self.sqlite_path) as conn:
             cur = conn.execute("UPDATE discovered_moments SET status = ? WHERE id = ?", (status, moment_id))
             return cur.rowcount > 0
+
+
+
+    def _format_campaign_row(self, row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        d = dict(row)
+        for json_key in [
+            'accepted_platforms', 'eligible_games', 'content_categories',
+            'required_hashtags', 'required_mentions', 'view_qualification_rules',
+            'geographic_eligibility', 'account_eligibility', 'content_restrictions',
+            'prohibited_editing_techniques', 'ambiguities'
+        ]:
+            if isinstance(d.get(json_key), str):
+                try:
+                    d[json_key] = json.loads(d[json_key])
+                except Exception:
+                    d[json_key] = [] if 'rules' not in json_key and 'eligibility' not in json_key else {}
+            elif d.get(json_key) is None:
+                d[json_key] = [] if 'rules' not in json_key and 'eligibility' not in json_key else {}
+        d['operator_approved'] = bool(d.get('operator_approved'))
+        return d
+
+    def create_campaign(self, campaign_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        campaign_data.setdefault('created_at', now_iso)
+        campaign_data.setdefault('updated_at', now_iso)
+        if self.has_supabase:
+            res = self.client.table('campaigns').insert(campaign_data).execute()
+            return res.data[0] if res.data else campaign_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                INSERT OR REPLACE INTO campaigns (
+                    id, marketplace_id, marketplace_name, campaign_external_id,
+                    name, description, url, status, deadline, submission_deadline,
+                    accepted_platforms, eligible_games, content_categories,
+                    required_hashtags, required_mentions, required_captions,
+                    min_clip_duration_seconds, max_clip_duration_seconds,
+                    resolution_requirements, aspect_ratio, reward_model,
+                    payout_amount, cpm, reward_per_view, view_qualification_rules,
+                    max_eligible_views, max_payout_per_clip, geographic_eligibility,
+                    account_eligibility, source_video_requirements, content_restrictions,
+                    prohibited_editing_techniques, required_attribution, submission_instructions,
+                    raw_rules, operator_approved, rejection_reason, review_notes, ambiguities,
+                    date_last_verified, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                campaign_data['id'],
+                campaign_data.get('marketplace_id', 'content_rewards'),
+                campaign_data.get('marketplace_name', 'Content Rewards'),
+                campaign_data.get('campaign_external_id'),
+                campaign_data['name'],
+                campaign_data.get('description'),
+                campaign_data['url'],
+                campaign_data.get('status', 'discovered'),
+                campaign_data.get('deadline'),
+                campaign_data.get('submission_deadline'),
+                json.dumps(campaign_data.get('accepted_platforms') or ['tiktok', 'youtube_shorts']),
+                json.dumps(campaign_data.get('eligible_games') or ['gta6']),
+                json.dumps(campaign_data.get('content_categories') or ['gaming']),
+                json.dumps(campaign_data.get('required_hashtags') or []),
+                json.dumps(campaign_data.get('required_mentions') or []),
+                campaign_data.get('required_captions'),
+                int(campaign_data.get('min_clip_duration_seconds') or 15),
+                int(campaign_data.get('max_clip_duration_seconds') or 60),
+                campaign_data.get('resolution_requirements', '1080x1920'),
+                campaign_data.get('aspect_ratio', '9:16'),
+                campaign_data.get('reward_model', 'cpm'),
+                float(campaign_data.get('payout_amount') or 0.0),
+                float(campaign_data.get('cpm') or 0.0),
+                float(campaign_data.get('reward_per_view') or 0.0),
+                json.dumps(campaign_data.get('view_qualification_rules') or {}),
+                int(campaign_data.get('max_eligible_views') or 0),
+                float(campaign_data.get('max_payout_per_clip') or 0.0),
+                json.dumps(campaign_data.get('geographic_eligibility') or ['ALL']),
+                json.dumps(campaign_data.get('account_eligibility') or {}),
+                campaign_data.get('source_video_requirements'),
+                json.dumps(campaign_data.get('content_restrictions') or []),
+                json.dumps(campaign_data.get('prohibited_editing_techniques') or []),
+                campaign_data.get('required_attribution'),
+                campaign_data.get('submission_instructions'),
+                campaign_data.get('raw_rules', ''),
+                1 if campaign_data.get('operator_approved') else 0,
+                campaign_data.get('rejection_reason'),
+                campaign_data.get('review_notes'),
+                json.dumps(campaign_data.get('ambiguities') or []),
+                campaign_data.get('date_last_verified', now_iso),
+                campaign_data.get('created_at', now_iso),
+                campaign_data.get('updated_at', now_iso),
+            ))
+            conn.commit()
+        return self.get_campaign(campaign_data['id']) or campaign_data
+
+    def get_campaign(self, campaign_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table('campaigns').select('*').eq('id', campaign_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM campaigns WHERE id = ?', (campaign_id,))
+            row = cursor.fetchone()
+            return self._format_campaign_row(row)
+
+    def list_campaigns(
+        self,
+        status: Optional[str] = None,
+        marketplace_id: Optional[str] = None,
+        game: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        if self.has_supabase:
+            query = self.client.table('campaigns').select('*', count='exact')
+            if status:
+                query = query.eq('status', status)
+            if marketplace_id:
+                query = query.eq('marketplace_id', marketplace_id)
+            res = query.order('created_at', desc=True).range(offset, offset + limit - 1).execute()
+            items = res.data or []
+            return items, res.count or len(items)
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            query = 'SELECT * FROM campaigns WHERE 1=1'
+            params = []
+            if status:
+                query += ' AND status = ?'
+                params.append(status)
+            if marketplace_id:
+                query += ' AND marketplace_id = ?'
+                params.append(marketplace_id)
+            if game:
+                query += ' AND eligible_games LIKE ?'
+                params.append(f'%{game}%')
+
+            cursor.execute(f'SELECT COUNT(*) FROM ({query})', tuple(params))
+            total = cursor.fetchone()[0]
+
+            query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+            params.extend([limit, offset])
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            items = [self._format_campaign_row(r) for r in rows if r]
+            return items, total
+
+    def update_campaign(self, campaign_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        updates['updated_at'] = datetime.now(timezone.utc).isoformat()
+        if self.has_supabase:
+            res = self.client.table('campaigns').update(updates).eq('id', campaign_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            set_clauses = []
+            values = []
+            for k, v in updates.items():
+                set_clauses.append(f'{k} = ?')
+                if isinstance(v, (list, dict)):
+                    values.append(json.dumps(v))
+                elif isinstance(v, bool):
+                    values.append(1 if v else 0)
+                else:
+                    values.append(v)
+            values.append(campaign_id)
+            cursor.execute(f'UPDATE campaigns SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
+            conn.commit()
+        return self.get_campaign(campaign_id)
+
+    def create_campaign_source(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        source_data.setdefault('created_at', now_iso)
+        source_data.setdefault('updated_at', now_iso)
+        if self.has_supabase:
+            res = self.client.table('campaign_sources').insert(source_data).execute()
+            return res.data[0] if res.data else source_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                INSERT OR REPLACE INTO campaign_sources (
+                    id, campaign_id, source_url, original_creator, source_type,
+                    permission_evidence, allowed_derivative_uses, authorized_platforms,
+                    permission_expiry, source_verification_status, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                source_data['id'],
+                source_data.get('campaign_id'),
+                source_data['source_url'],
+                source_data.get('original_creator', 'Unknown'),
+                source_data.get('source_type', 'campaign_provided'),
+                source_data.get('permission_evidence', ''),
+                json.dumps(source_data.get('allowed_derivative_uses') or ['short_form_clipping', 'vertical_reframe', 'burn_captions']),
+                json.dumps(source_data.get('authorized_platforms') or ['tiktok', 'youtube_shorts']),
+                source_data.get('permission_expiry'),
+                source_data.get('source_verification_status', 'pending_verification'),
+                source_data.get('notes'),
+                source_data.get('created_at', now_iso),
+                source_data.get('updated_at', now_iso),
+            ))
+            conn.commit()
+        return self.get_campaign_source(source_data['id']) or source_data
+
+    def get_campaign_source(self, source_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table('campaign_sources').select('*').eq('id', source_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM campaign_sources WHERE id = ?', (source_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            for k in ['allowed_derivative_uses', 'authorized_platforms']:
+                if isinstance(d.get(k), str):
+                    try:
+                        d[k] = json.loads(d[k])
+                    except Exception:
+                        d[k] = []
+            return d
+
+    def list_campaign_sources(self, campaign_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            query = self.client.table('campaign_sources').select('*')
+            if campaign_id:
+                query = query.eq('campaign_id', campaign_id)
+            res = query.order('created_at', desc=True).execute()
+            return res.data or []
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            if campaign_id:
+                cursor.execute('SELECT * FROM campaign_sources WHERE campaign_id = ? ORDER BY created_at DESC', (campaign_id,))
+            else:
+                cursor.execute('SELECT * FROM campaign_sources ORDER BY created_at DESC')
+            rows = cursor.fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                for k in ['allowed_derivative_uses', 'authorized_platforms']:
+                    if isinstance(d.get(k), str):
+                        try:
+                            d[k] = json.loads(d[k])
+                        except Exception:
+                            d[k] = []
+                items.append(d)
+            return items
+
+    def update_campaign_source(self, source_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        updates['updated_at'] = datetime.now(timezone.utc).isoformat()
+        if self.has_supabase:
+            res = self.client.table('campaign_sources').update(updates).eq('id', source_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            set_clauses = []
+            values = []
+            for k, v in updates.items():
+                set_clauses.append(f'{k} = ?')
+                if isinstance(v, (list, dict)):
+                    values.append(json.dumps(v))
+                else:
+                    values.append(v)
+            values.append(source_id)
+            cursor.execute(f'UPDATE campaign_sources SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
+            conn.commit()
+        return self.get_campaign_source(source_id)
+
+    def save_campaign_clip_compliance(self, compliance_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        compliance_data.setdefault('id', f"cclp_{uuid.uuid4().hex[:12]}")
+        compliance_data.setdefault('created_at', now_iso)
+        compliance_data.setdefault('updated_at', now_iso)
+        if self.has_supabase:
+            res = self.client.table('campaign_clips').insert(compliance_data).execute()
+            return res.data[0] if res.data else compliance_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                INSERT OR REPLACE INTO campaign_clips (
+                    id, clip_id, campaign_id, source_id, job_id, target_platform,
+                    compliance_status, compliance_results, submission_ready, failure_reasons,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                compliance_data['id'],
+                compliance_data['clip_id'],
+                compliance_data['campaign_id'],
+                compliance_data.get('source_id'),
+                compliance_data.get('job_id'),
+                compliance_data.get('target_platform', 'tiktok'),
+                compliance_data.get('compliance_status', 'pending_validation'),
+                json.dumps(compliance_data.get('compliance_results') or {}),
+                1 if compliance_data.get('submission_ready') else 0,
+                json.dumps(compliance_data.get('failure_reasons') or []),
+                compliance_data.get('created_at', now_iso),
+                compliance_data.get('updated_at', now_iso),
+            ))
+            conn.commit()
+        return self.get_campaign_clip_compliance(compliance_data['clip_id']) or compliance_data
+
+    def get_campaign_clip_compliance(self, clip_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table('campaign_clips').select('*').eq('clip_id', clip_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM campaign_clips WHERE clip_id = ? ORDER BY created_at DESC LIMIT 1', (clip_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            for k in ['compliance_results', 'failure_reasons']:
+                if isinstance(d.get(k), str):
+                    try:
+                        d[k] = json.loads(d[k])
+                    except Exception:
+                        d[k] = {} if k == 'compliance_results' else []
+            d['submission_ready'] = bool(d.get('submission_ready'))
+            return d
+
+    def list_campaign_clips(self, campaign_id: str) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table('campaign_clips').select('*').eq('campaign_id', campaign_id).order('created_at', desc=True).execute()
+            return res.data or []
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM campaign_clips WHERE campaign_id = ? ORDER BY created_at DESC', (campaign_id,))
+            rows = cursor.fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                for k in ['compliance_results', 'failure_reasons']:
+                    if isinstance(d.get(k), str):
+                        try:
+                            d[k] = json.loads(d[k])
+                        except Exception:
+                            d[k] = {} if k == 'compliance_results' else []
+                d['submission_ready'] = bool(d.get('submission_ready'))
+                items.append(d)
+            return items
+
+    def create_clip_submission(self, submission_data: Dict[str, Any]) -> Dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        submission_data.setdefault('created_at', now_iso)
+        submission_data.setdefault('updated_at', now_iso)
+        submission_data.setdefault('submitted_at', now_iso)
+        if self.has_supabase:
+            res = self.client.table('clip_submissions').insert(submission_data).execute()
+            return res.data[0] if res.data else submission_data
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                INSERT OR REPLACE INTO clip_submissions (
+                    id, clip_id, campaign_id, platform, submitted_at, submission_url,
+                    submission_post_id, submission_evidence, status, eligible_views,
+                    pending_rewards, approved_rewards, rejected_rewards, withdrawable_earnings,
+                    rejection_reason, last_verified_at, operator_notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                submission_data['id'],
+                submission_data['clip_id'],
+                submission_data['campaign_id'],
+                submission_data.get('platform', 'tiktok'),
+                submission_data.get('submitted_at', now_iso),
+                submission_data.get('submission_url'),
+                submission_data.get('submission_post_id'),
+                json.dumps(submission_data.get('submission_evidence') or {}),
+                submission_data.get('status', 'submitted'),
+                int(submission_data.get('eligible_views') or 0),
+                float(submission_data.get('pending_rewards') or 0.0),
+                float(submission_data.get('approved_rewards') or 0.0),
+                float(submission_data.get('rejected_rewards') or 0.0),
+                float(submission_data.get('withdrawable_earnings') or 0.0),
+                submission_data.get('rejection_reason'),
+                submission_data.get('last_verified_at', now_iso),
+                submission_data.get('operator_notes'),
+                submission_data.get('created_at', now_iso),
+                submission_data.get('updated_at', now_iso),
+            ))
+            conn.commit()
+        return self.get_clip_submission(submission_data['id']) or submission_data
+
+    def get_clip_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
+        if self.has_supabase:
+            res = self.client.table('clip_submissions').select('*').eq('id', submission_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM clip_submissions WHERE id = ?', (submission_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            if isinstance(d.get('submission_evidence'), str):
+                try:
+                    d['submission_evidence'] = json.loads(d['submission_evidence'])
+                except Exception:
+                    d['submission_evidence'] = {}
+            return d
+
+    def list_clip_submissions(self, campaign_id: Optional[str] = None, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        if self.has_supabase:
+            query = self.client.table('clip_submissions').select('*')
+            if campaign_id:
+                query = query.eq('campaign_id', campaign_id)
+            if status:
+                query = query.eq('status', status)
+            res = query.order('submitted_at', desc=True).execute()
+            return res.data or []
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            query = 'SELECT * FROM clip_submissions WHERE 1=1'
+            params = []
+            if campaign_id:
+                query += ' AND campaign_id = ?'
+                params.append(campaign_id)
+            if status:
+                query += ' AND status = ?'
+                params.append(status)
+            query += ' ORDER BY submitted_at DESC'
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                if isinstance(d.get('submission_evidence'), str):
+                    try:
+                        d['submission_evidence'] = json.loads(d['submission_evidence'])
+                    except Exception:
+                        d['submission_evidence'] = {}
+                items.append(d)
+            return items
+
+    def update_clip_submission(self, submission_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        updates['updated_at'] = datetime.now(timezone.utc).isoformat()
+        if self.has_supabase:
+            res = self.client.table('clip_submissions').update(updates).eq('id', submission_id).execute()
+            return res.data[0] if res.data else None
+
+        with self.lock, sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            set_clauses = []
+            values = []
+            for k, v in updates.items():
+                set_clauses.append(f'{k} = ?')
+                if isinstance(v, (list, dict)):
+                    values.append(json.dumps(v))
+                else:
+                    values.append(v)
+            values.append(submission_id)
+            cursor.execute(f'UPDATE clip_submissions SET {', '.join(set_clauses)} WHERE id = ?', tuple(values))
+            conn.commit()
+        return self.get_clip_submission(submission_id)
 
 
 db = DatabaseClient()

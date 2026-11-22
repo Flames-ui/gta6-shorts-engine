@@ -19,6 +19,15 @@ logger = logging.getLogger("gta6_shorts.gameplay_analyzer")
 
 # High-yield GTA 6 gameplay event categories
 GAMEPLAY_EVENT_TYPES = [
+    "unexpected_gameplay_events",
+    "funny_failures",
+    "close_escapes",
+    "impressive_skills",
+    "unexpected_discoveries",
+    "dramatic_moments",
+    "rare_interactions",
+    "strong_reactions",
+    "memorable_gta6_moments",
     "police_chase",
     "vehicle_crash",
     "stunt_jump",

@@ -41,6 +41,29 @@ def process_video_job(job_id: str):
         llm_provider = job.get("llm_provider", "gemini")
         mode = job.get("mode", "local")
 
+        # Step 0: Campaign Eligibility Gate Check
+        campaign_id = job.get("campaign_id")
+        source_id = job.get("source_id")
+        target_platform = job.get("target_platform", "tiktok")
+
+        campaign = None
+        source = None
+        if campaign_id:
+            from .campaign_eligibility import campaign_eligibility_service
+            campaign = db.get_campaign(campaign_id)
+            if source_id:
+                source = db.get_campaign_source(source_id)
+
+            gate_ok, gate_reason, gate_details = campaign_eligibility_service.validate_clipping_gate(
+                campaign=campaign,
+                source=source,
+                target_platform=target_platform,
+            )
+            if not gate_ok:
+                db.update_job_progress(job_id, stage="campaign_gate", status="failed", error=gate_reason)
+                db.add_log(job_id, "campaign_gate", f"Blocked by campaign eligibility gate: {gate_reason}")
+                return
+
         # Step 1: Video Acquisition (Safe Ingestion)
         db.update_job_progress(job_id, stage="downloading", progress=10, status="processing")
         db.add_log(job_id, "downloading", f"Acquiring video source for category '{category_id}': {job['url']}")
@@ -176,6 +199,48 @@ def process_video_job(job_id: str):
 
             # Step 5: Final Video Validation & Quality Inspection
             val_result = video_validator.validate_clip(local_clip_path)
+            # Step 5b: Campaign Compliance Validation
+            compliance_status = "compliant"
+            submission_ready = val_result.is_valid
+            failure_reasons = []
+            if campaign:
+                from .compliance_validator import compliance_validator
+                req_tags = campaign.get("required_hashtags") or []
+                req_mentions = campaign.get("required_mentions") or []
+                combined_caption = f"{social_data.get('title') or video_title} {' '.join(req_mentions)} {' '.join(req_tags)}"
+
+                comp_result = compliance_validator.validate_clip_compliance(
+                    clip_id=clip_id,
+                    video_path=local_clip_path,
+                    campaign=campaign,
+                    source=source,
+                    target_platform=target_platform,
+                    clip_metadata={
+                        "duration": dur,
+                        "caption": combined_caption,
+                        "hashtags": ' '.join(req_tags),
+                        "description": social_data.get('description'),
+                        "start_time": start,
+                        "end_time": end,
+                    },
+                    existing_clips=rendered_clips,
+                )
+                compliance_status = "compliant" if comp_result.is_compliant else "non_compliant"
+                submission_ready = comp_result.submission_ready
+                failure_reasons = comp_result.failure_reasons
+
+                db.save_campaign_clip_compliance({
+                    "clip_id": clip_id,
+                    "campaign_id": campaign["id"],
+                    "source_id": source_id,
+                    "job_id": job_id,
+                    "target_platform": target_platform,
+                    "compliance_status": compliance_status,
+                    "compliance_results": comp_result.details,
+                    "submission_ready": submission_ready,
+                    "failure_reasons": failure_reasons,
+                })
+
             if not val_result.is_valid:
                 logger.warning("Clip %s failed validation: %s", clip_id, val_result.issues)
 

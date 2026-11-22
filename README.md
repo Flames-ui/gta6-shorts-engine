@@ -396,3 +396,79 @@ The engine is engineered to run in a fully verified, fail-closed posture in prod
 5. Processing and publication state is stored in Supabase; Redis remains the execution queue. On worker restart, stale processing jobs can be recovered from persisted status/heartbeat and retried without treating unaccepted provider requests as published.
 
 Do not place a service-role key in this README, `.env.example`, frontend variables, or Git history. SQL migrations must be applied with database-owner access; a Supabase REST service-role token does not provide a general SQL execution endpoint.
+
+---
+
+## 13. Milestone 1 — Campaign-Aware Gaming Clipping Engine
+
+The system has been enhanced with a private, single-operator campaign clipping engine focused exclusively on **GTA 6** and **gaming content** for **TikTok** and **YouTube Shorts** campaigns.
+
+### Key Capabilities
+
+1. **Campaign Data Model & Rule Reader (`app/services/campaign_rule_reader.py`)**
+   - Natural language and structured campaign analysis extracting reward models (`cpm`, `prize_pool`, `fixed_per_clip`), eligible games, accepted platforms (`tiktok`, `youtube_shorts`), duration constraints, required hashtags (`#GTA6`, `#KaiCenat`), required mentions (`@kaicenat`), permitted footage, and disqualification triggers.
+   - **Untrusted Input Protection**: Defense-in-depth sanitization detecting prompt injection and control sequence attempts in raw campaign texts, flagging security warnings without code execution.
+   - **Ambiguity Detection**: Missing bounds or vague payout formulas immediately flag `needs_review` rather than inventing assumptions.
+
+2. **Strict Campaign Eligibility Gate (`app/services/campaign_eligibility.py`)**
+   - **"No campaign, no clipping. No verified earning opportunity, no production."**
+   - Direct requests to `/api/v1/jobs` without an active, approved campaign and verified source footage are rejected (HTTP 400).
+   - Validates campaign active status, TikTok/YouTube Shorts support, non-expired deadline, gaming category qualification, and source footage rights.
+
+3. **Marketplace Connector Architecture (`app/services/marketplaces/`)**
+   - Extensible marketplace adapter interface (`BaseMarketplaceAdapter`) supporting discovery, instruction extraction, and session verification.
+   - **Content Rewards Adapter (`content_rewards.py`)**: Supports discovery of active gaming campaigns, detects login/CAPTCHA/session requirements, and provides a compliant operator manual import workflow (`POST /api/v1/campaigns/import`) avoiding unauthorized scraping.
+
+4. **Source-Video Authorization (`app/services/source_authorization.py`)**
+   - Stores source URL, original creator, permission evidence, allowed derivative uses, authorized platforms, expiry date, and verification status (`verified`, `pending_verification`, `rejected`).
+   - Prevents unauthorized footage from entering rendering queues.
+
+5. **Integrated Gaming Pipeline & Moment Detection (`app/services/gameplay_analyzer.py`)**
+   - Detects 9 core gaming moment types:
+     - `unexpected_gameplay_events`
+     - `funny_failures`
+     - `close_escapes`
+     - `impressive_skills`
+     - `unexpected_discoveries`
+     - `dramatic_moments`
+     - `rare_interactions`
+     - `strong_reactions`
+     - `memorable_gta6_moments`
+   - Evaluates audio energy peaks, visual motion variance, and gaming keyword indicators, ranking multiple candidates before vertical 9:16 rendering.
+
+6. **Compliance & Quality Validation (`app/services/compliance_validator.py`)**
+   - Enforces 10 distinct quality and campaign compliance checks:
+     - `duration_check`: Verifies clip duration is within `[min_clip_duration, max_clip_duration]`.
+     - `aspect_ratio_check`: Validates vertical 9:16 framing.
+     - `resolution_check`: Validates minimum 1080x1920 resolution.
+     - `video_integrity_check`: Probes for black frames, corruption, and frozen video.
+     - `audio_integrity_check`: Verifies presence of non-silent normalized audio.
+     - `required_hashtags_check`: Ensures all campaign hashtags are embedded in captions.
+     - `required_mentions_check`: Verifies required sponsor/creator account mentions.
+     - `platform_eligibility_check`: Validates target platform against campaign permissions.
+     - `prohibited_editing_check`: Blocks disallowed edits (raw reuploads, watermarks).
+     - `duplicate_check`: Detects identical or overlapping clip timestamps.
+
+7. **Earnings Tracking Foundations (`app/services/earnings_tracker.py`)**
+   - Tracks submission evidence, live post URLs, verified eligible views, and payout amounts.
+   - **Honest Payout Ledger**: Strictly distinguishes `pending_rewards` from confirmed `approved_rewards`, preventing premature earnings reporting.
+   - Tracks real-time progress toward a **$500 monthly target over 30 days**.
+
+### Campaign API Endpoints
+
+| Method | Endpoint | Description |
+|:---|:---|:---|
+| `GET` | `/api/v1/campaigns/discover` | Discover active gaming campaigns from marketplaces |
+| `POST` | `/api/v1/campaigns/import` | Import campaign via URL or raw operator rules |
+| `POST` | `/api/v1/campaigns` | Register a new campaign with rule analysis |
+| `GET` | `/api/v1/campaigns` | List campaigns with filters (`status`, `game`, `marketplace`) |
+| `GET` | `/api/v1/campaigns/{id}` | Retrieve complete campaign details and raw rules |
+| `POST` | `/api/v1/campaigns/{id}/analyze` | Re-analyze campaign eligibility and ambiguous rules |
+| `POST` | `/api/v1/campaigns/{id}/review` | Operator approve or reject campaign |
+| `POST` | `/api/v1/campaigns/{id}/sources` | Register authorized source footage with rights evidence |
+| `GET` | `/api/v1/campaigns/{id}/sources` | List authorized footage associated with campaign |
+| `POST` | `/api/v1/campaigns/{id}/jobs` | Enqueue clipping job through central eligibility gate |
+| `GET` | `/api/v1/campaigns/{id}/clips` | List clips generated for campaign with compliance status |
+| `GET` | `/api/v1/clips/{clip_id}/compliance` | Inspect 10-point compliance results for a clip |
+| `POST` | `/api/v1/campaigns/{id}/submit` | Record live submission evidence for earnings verification |
+| `GET` | `/api/v1/campaigns/earnings/summary` | Progress toward $500 30-day earnings target |

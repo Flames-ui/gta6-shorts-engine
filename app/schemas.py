@@ -94,6 +94,18 @@ class JobCreateRequest(BaseModel):
         default=None,
         description="Optional custom focus prompt for highlight detection",
     )
+    campaign_id: Optional[str] = Field(
+        default=None,
+        description="Associated campaign ID for campaign-aware production",
+    )
+    source_id: Optional[str] = Field(
+        default=None,
+        description="Associated authorized source ID for campaign-aware production",
+    )
+    target_platform: str = Field(
+        default="tiktok",
+        description="Target campaign platform: 'tiktok' or 'youtube_shorts'",
+    )
     force: bool = Field(
         default=False,
         description="Force processing even if duplicate active URL exists",
@@ -377,3 +389,272 @@ class AuditLogEntryResponse(BaseModel):
     details: Dict[str, Any] = {}
     ip_address: Optional[str] = None
     created_at: str
+
+
+# =============================================================================
+# Milestone 1: Campaign-Aware Gaming Clipping Engine Schemas
+# =============================================================================
+
+class CampaignStatus(str, Enum):
+    DISCOVERED = "discovered"
+    ANALYZING = "analyzing"
+    ELIGIBLE = "eligible"
+    NEEDS_REVIEW = "needs_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    EXHAUSTED = "exhausted"
+
+
+class CampaignPlatform(str, Enum):
+    TIKTOK = "tiktok"
+    YOUTUBE_SHORTS = "youtube_shorts"
+
+
+class CampaignRewardModel(str, Enum):
+    CPM = "cpm"
+    PRIZE_POOL = "prize_pool"
+    FIXED_PER_CLIP = "fixed_per_clip"
+    BOUNTY = "bounty"
+
+
+class SourceVerificationStatus(str, Enum):
+    VERIFIED = "verified"
+    PENDING_VERIFICATION = "pending_verification"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class CampaignRuleAnalysis(BaseModel):
+    is_confident: bool = Field(default=True, description="True if all essential rules could be confidently interpreted")
+    permitted_content: List[str] = Field(default_factory=list)
+    accepted_games: List[str] = Field(default_factory=list)
+    accepted_platforms: List[str] = Field(default_factory=list)
+    allowed_footage: List[str] = Field(default_factory=list)
+    permitted_editing: List[str] = Field(default_factory=list)
+    min_clip_duration_seconds: Optional[int] = None
+    max_clip_duration_seconds: Optional[int] = None
+    required_hashtags: List[str] = Field(default_factory=list)
+    required_mentions: List[str] = Field(default_factory=list)
+    required_captions: Optional[str] = None
+    reward_model: str = Field(default="cpm")
+    cpm: Optional[float] = None
+    payout_amount: Optional[float] = None
+    reward_per_view: Optional[float] = None
+    view_qualification_rules: Dict[str, Any] = Field(default_factory=dict)
+    disqualification_reasons: List[str] = Field(default_factory=list)
+    ambiguities: List[str] = Field(default_factory=list)
+    security_warnings: List[str] = Field(default_factory=list)
+
+
+class CampaignCreateRequest(BaseModel):
+    marketplace_id: str = Field(default="content_rewards", description="Marketplace identifier")
+    marketplace_name: str = Field(default="Content Rewards", description="Marketplace display name")
+    campaign_external_id: Optional[str] = None
+    name: str = Field(..., description="Campaign name")
+    description: Optional[str] = None
+    url: str = Field(..., description="Campaign landing page URL")
+    raw_rules: str = Field(..., description="Full original campaign rules text")
+    deadline: Optional[str] = None
+    submission_deadline: Optional[str] = None
+    accepted_platforms: List[str] = Field(default=["tiktok", "youtube_shorts"])
+    eligible_games: List[str] = Field(default=["gta6"])
+    content_categories: List[str] = Field(default=["gaming"])
+    required_hashtags: List[str] = Field(default_factory=list)
+    required_mentions: List[str] = Field(default_factory=list)
+    required_captions: Optional[str] = None
+    min_clip_duration_seconds: int = 15
+    max_clip_duration_seconds: int = 60
+    resolution_requirements: str = "1080x1920"
+    aspect_ratio: str = "9:16"
+    reward_model: str = "cpm"
+    payout_amount: float = 0.0
+    cpm: float = 0.0
+    reward_per_view: float = 0.0
+    view_qualification_rules: Dict[str, Any] = Field(default_factory=dict)
+    max_eligible_views: int = 0
+    max_payout_per_clip: float = 0.0
+    geographic_eligibility: List[str] = Field(default=["ALL"])
+    account_eligibility: Dict[str, Any] = Field(default_factory=dict)
+    source_video_requirements: Optional[str] = None
+    content_restrictions: List[str] = Field(default_factory=list)
+    prohibited_editing_techniques: List[str] = Field(default_factory=list)
+    required_attribution: Optional[str] = None
+    submission_instructions: Optional[str] = None
+
+
+class CampaignImportRequest(BaseModel):
+    url: str = Field(..., description="Campaign URL on marketplace")
+    raw_rules: Optional[str] = Field(default=None, description="Optional operator-provided raw rules text")
+    marketplace_id: str = Field(default="content_rewards", description="Target marketplace adapter")
+    auto_analyze: bool = Field(default=True, description="Automatically run rule reader upon import")
+
+
+class CampaignUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    deadline: Optional[str] = None
+    submission_deadline: Optional[str] = None
+    accepted_platforms: Optional[List[str]] = None
+    eligible_games: Optional[List[str]] = None
+    required_hashtags: Optional[List[str]] = None
+    required_mentions: Optional[List[str]] = None
+    required_captions: Optional[str] = None
+    min_clip_duration_seconds: Optional[int] = None
+    max_clip_duration_seconds: Optional[int] = None
+    cpm: Optional[float] = None
+    payout_amount: Optional[float] = None
+    reward_model: Optional[str] = None
+    source_video_requirements: Optional[str] = None
+    content_restrictions: Optional[List[str]] = None
+    review_notes: Optional[str] = None
+
+
+class CampaignReviewRequest(BaseModel):
+    decision: str = Field(..., description="'approve' or 'reject'")
+    reason: Optional[str] = Field(default=None, description="Reason for approval or rejection")
+    notes: Optional[str] = Field(default=None, description="Operator review notes")
+
+
+class CampaignResponse(BaseModel):
+    id: str
+    marketplace_id: str
+    marketplace_name: str
+    campaign_external_id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    url: str
+    status: str
+    deadline: Optional[str] = None
+    submission_deadline: Optional[str] = None
+    accepted_platforms: List[str] = Field(default_factory=list)
+    eligible_games: List[str] = Field(default_factory=list)
+    content_categories: List[str] = Field(default_factory=list)
+    required_hashtags: List[str] = Field(default_factory=list)
+    required_mentions: List[str] = Field(default_factory=list)
+    required_captions: Optional[str] = None
+    min_clip_duration_seconds: int = 15
+    max_clip_duration_seconds: int = 60
+    resolution_requirements: str = "1080x1920"
+    aspect_ratio: str = "9:16"
+    reward_model: str = "cpm"
+    payout_amount: float = 0.0
+    cpm: float = 0.0
+    reward_per_view: float = 0.0
+    view_qualification_rules: Dict[str, Any] = Field(default_factory=dict)
+    max_eligible_views: int = 0
+    max_payout_per_clip: float = 0.0
+    geographic_eligibility: List[str] = Field(default_factory=list)
+    account_eligibility: Dict[str, Any] = Field(default_factory=dict)
+    source_video_requirements: Optional[str] = None
+    content_restrictions: List[str] = Field(default_factory=list)
+    prohibited_editing_techniques: List[str] = Field(default_factory=list)
+    required_attribution: Optional[str] = None
+    submission_instructions: Optional[str] = None
+    raw_rules: str = ""
+    operator_approved: bool = False
+    rejection_reason: Optional[str] = None
+    review_notes: Optional[str] = None
+    ambiguities: List[str] = Field(default_factory=list)
+    date_last_verified: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CampaignListResponse(BaseModel):
+    items: List[CampaignResponse]
+    total: int
+    offset: int
+    limit: int
+
+
+class CampaignSourceRequest(BaseModel):
+    source_url: str = Field(..., description="URL of source video or asset")
+    original_creator: str = Field(..., description="Creator, rights holder, or streamer")
+    source_type: str = Field(default="campaign_provided", description="campaign_provided, creator_authorized, official_trailer, streamer_vod")
+    permission_evidence: str = Field(..., description="Clause, license statement, or proof authorizing clipping")
+    allowed_derivative_uses: List[str] = Field(default=["short_form_clipping", "vertical_reframe", "burn_captions"])
+    authorized_platforms: List[str] = Field(default=["tiktok", "youtube_shorts"])
+    permission_expiry: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CampaignSourceResponse(BaseModel):
+    id: str
+    campaign_id: str
+    source_url: str
+    original_creator: str
+    source_type: str
+    permission_evidence: str
+    allowed_derivative_uses: List[str] = Field(default_factory=list)
+    authorized_platforms: List[str] = Field(default_factory=list)
+    permission_expiry: Optional[str] = None
+    source_verification_status: str
+    notes: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CampaignEligibilityResult(BaseModel):
+    campaign_id: str
+    is_eligible: bool
+    status: str
+    eligible_for_production: bool
+    reasons: List[str]
+    checks: Dict[str, bool]
+
+
+class ClipComplianceResult(BaseModel):
+    clip_id: str
+    campaign_id: str
+    target_platform: str
+    is_compliant: bool
+    submission_ready: bool
+    checks: Dict[str, bool]
+    failure_reasons: List[str]
+    details: Dict[str, Any]
+
+
+class ClipSubmissionRequest(BaseModel):
+    clip_id: str = Field(..., description="Clip ID")
+    platform: str = Field(default="tiktok", description="Target platform: 'tiktok' or 'youtube_shorts'")
+    submission_url: str = Field(..., description="Live published post URL on platform")
+    submission_post_id: Optional[str] = Field(default=None, description="Platform video identifier")
+    submission_evidence: Dict[str, Any] = Field(default_factory=dict, description="Screenshot URL, confirmation code, etc.")
+    operator_notes: Optional[str] = None
+
+
+class ClipSubmissionResponse(BaseModel):
+    id: str
+    clip_id: str
+    campaign_id: str
+    platform: str
+    submitted_at: str
+    submission_url: Optional[str] = None
+    submission_post_id: Optional[str] = None
+    submission_evidence: Dict[str, Any]
+    status: str
+    eligible_views: int
+    pending_rewards: float
+    approved_rewards: float
+    rejected_rewards: float
+    withdrawable_earnings: float
+    rejection_reason: Optional[str] = None
+    last_verified_at: Optional[str] = None
+    operator_notes: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class EarningsSummaryResponse(BaseModel):
+    target_amount: float = 500.00
+    period_start: str
+    period_end: str
+    total_submitted_clips: int
+    total_eligible_views: int
+    total_pending_rewards: float
+    total_approved_rewards: float
+    total_rejected_rewards: float
+    total_withdrawable_earnings: float
+    progress_percent: float
+    days_remaining: int

@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from .endpoints import (
     analytics,
     audit_logs,
+    campaigns,
     auth,
     autonomous,
     categories,
@@ -37,3 +38,4 @@ api_v1_router.include_router(schedules.router)
 api_v1_router.include_router(quotas.router)
 api_v1_router.include_router(channels.router)
 api_v1_router.include_router(audit_logs.router)
+api_v1_router.include_router(campaigns.router)

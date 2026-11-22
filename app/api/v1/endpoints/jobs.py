@@ -31,6 +31,42 @@ async def create_job(
     Accepts validated URLs, assigns category, verifies duplicate jobs,
     and enqueues processing to the background worker.
     """
+    # Campaign Eligibility Gate Enforcement (Milestone 1)
+    if payload.campaign_id or getattr(settings, "ENFORCE_CAMPAIGN_GATE", False) or settings.ENVIRONMENT.lower() == "production":
+        if not payload.campaign_id:
+            if settings.ENVIRONMENT.lower() == "test" and not getattr(settings, "STRICT_CAMPAIGN_GATE_TEST", False):
+                pass
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Campaign-aware policy violation: No campaign, no clipping. Direct clipping requests without an approved campaign and authorized source footage are prohibited.",
+                )
+        else:
+            from ....services.campaign_eligibility import campaign_eligibility_service
+            campaign = db.get_campaign(payload.campaign_id)
+            if not campaign:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Campaign '{payload.campaign_id}' not found",
+                )
+            source = None
+            if payload.source_id:
+                source = db.get_campaign_source(payload.source_id)
+            else:
+                sources = db.list_campaign_sources(campaign_id=payload.campaign_id)
+                source = next((s for s in sources if s.get("source_url") == payload.url), None)
+
+            gate_ok, gate_reason, details = campaign_eligibility_service.validate_clipping_gate(
+                campaign=campaign,
+                source=source,
+                target_platform=payload.target_platform or "tiktok",
+            )
+            if not gate_ok:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Production Gate Rejection: {gate_reason}",
+                )
+
     # Verify category exists
     cat = category_service.get_category(payload.category_id)
     if not cat:
@@ -56,6 +92,9 @@ async def create_job(
         "user_id": user_id,
         "url": payload.url,
         "category_id": payload.category_id,
+        "campaign_id": payload.campaign_id,
+        "source_id": payload.source_id,
+        "target_platform": payload.target_platform or "tiktok",
         "status": JobStatus.QUEUED.value,
         "stage": "pending",
         "progress": 0,

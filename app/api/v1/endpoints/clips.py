@@ -8,6 +8,7 @@ from ....auth import AuthContext, enforce_resource_ownership, verify_api_key
 from ....config import settings
 from ....schemas import (
     ClipApprovalRequest,
+    ClipComplianceResult,
     ClipResponse,
     ClipScheduleRequest,
     PublishingStatus,
@@ -241,3 +242,18 @@ async def schedule_clip_publishing(
         "scheduled_for": scheduled_iso,
         "buffer_update_id": buffer_res.get("update_id"),
     }
+
+
+@router.get("/clips/{clip_id}/compliance", response_model=ClipComplianceResult)
+async def get_clip_compliance(
+    clip_id: str,
+    auth: AuthContext = Depends(verify_api_key),
+):
+    """Retrieve detailed compliance and quality validation results for a clip."""
+    comp = db.get_campaign_clip_compliance(clip_id)
+    if not comp:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Compliance results for clip {clip_id} not found",
+        )
+    return comp
