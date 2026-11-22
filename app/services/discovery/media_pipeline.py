@@ -10,7 +10,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..campaign_eligibility import CampaignEligibilityService
 from ..supabase_client import db
@@ -69,21 +69,16 @@ def _rights_decision(source: Optional[Dict[str, Any]], now: Optional[datetime] =
 
 # ---------------------------------------------------------------- metadata
 
-def _metadata_updates(item: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]:
-    now = _now_iso()
-    video_id = item.get("youtube_video_id") or video_id_from_url(item.get("original_url"))
-    base: Dict[str, Any] = {"metadata_checked_at": now}
-    if not video_id:
-        return {**base, "metadata_status": "failed", "metadata_error": "not_a_youtube_video"}
-    base["youtube_video_id"] = video_id
-    try:
-        found = fetch_video_metadata([video_id], api_key=api_key)
-    except YouTubeMetadataError as exc:
-        return {**base, "metadata_status": "failed", "metadata_error": exc.code}
-    meta = found.get(video_id)
+# Failures caused by configuration or the network. Items with these codes are retried on the next poll.
+TRANSIENT_METADATA_ERRORS = frozenset({"youtube_api_key_missing", "metadata_request_failed", "metadata_http_error"})
+MAX_METADATA_IDS_PER_CALL = 50
+
+
+def _metadata_from_meta(item: Dict[str, Any], video_id: str, meta: Optional[Dict[str, Any]], now: str) -> Dict[str, Any]:
+    """Map one videos.list result to pipeline columns. Nothing is defaulted: a missing field stays missing."""
+    base: Dict[str, Any] = {"metadata_checked_at": now, "youtube_video_id": video_id}
     if meta is None:
         return {**base, "metadata_status": "failed", "metadata_error": "video_not_found"}
-
     availability = availability_for(meta)
     details = {
         **base,
@@ -106,16 +101,91 @@ def _metadata_updates(item: Dict[str, Any], api_key: Optional[str] = None) -> Di
     }
 
 
+def _metadata_updates(item: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]:
+    now = _now_iso()
+    video_id = item.get("youtube_video_id") or video_id_from_url(item.get("original_url"))
+    if not video_id:
+        return {"metadata_checked_at": now, "metadata_status": "failed", "metadata_error": "not_a_youtube_video"}
+    try:
+        found = fetch_video_metadata([video_id], api_key=api_key)
+    except YouTubeMetadataError as exc:
+        return {"metadata_checked_at": now, "youtube_video_id": video_id,
+                "metadata_status": "failed", "metadata_error": exc.code}
+    return _metadata_from_meta(item, video_id, found.get(video_id), now)
+
+
+def _log_metadata(item_id: str, source_id: Optional[str], updates: Dict[str, Any]) -> None:
+    _log("metadata", item_id, source_id, updates["metadata_status"],
+         error=updates.get("metadata_error"), duration_seconds=updates.get("duration_seconds"))
+
+
 def resolve_metadata(item_id: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Resolve title, channel, thumbnail, duration and availability. Never marks the item processed."""
     item = _load(item_id)
     updates = _metadata_updates(item, api_key=api_key)
     db.update_discovered_content(item_id, updates)
-    _log("metadata", item_id, item.get("source_id"), updates["metadata_status"],
-         error=updates.get("metadata_error"), duration_seconds=updates.get("duration_seconds"))
+    _log_metadata(item_id, item.get("source_id"), updates)
     return {"item_id": item_id, **{k: updates.get(k) for k in (
         "metadata_status", "metadata_error", "duration_seconds", "availability", "title", "channel_title",
         "thumbnail_url", "published_at", "youtube_video_id")}}
+
+
+def unresolved_item_ids(items: List[Dict[str, Any]]) -> List[str]:
+    """IDs of items whose metadata is not resolved yet, including failures that a later pass can fix."""
+    return [str(it["id"]) for it in items if it.get("id") and it.get("metadata_status") != "resolved"]
+
+
+def resolve_metadata_batch(item_ids: List[str], api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Resolve many items with one Data API call per 50 distinct videos. A failed call fails only its own items."""
+    now = _now_iso()
+    summary: Dict[str, Any] = {"requested": len(item_ids), "resolved": 0, "failed": 0,
+                               "api_call_attempts": 0, "failure_codes": {}}
+
+    def record(item: Dict[str, Any], updates: Dict[str, Any]) -> None:
+        db.update_discovered_content(item["id"], updates)
+        _log_metadata(item["id"], item.get("source_id"), updates)
+        if updates["metadata_status"] == "resolved":
+            summary["resolved"] += 1
+        else:
+            summary["failed"] += 1
+            code = updates.get("metadata_error") or "unknown"
+            summary["failure_codes"][code] = summary["failure_codes"].get(code, 0) + 1
+
+    pending: List[tuple] = []
+    for item_id in dict.fromkeys(item_ids):
+        item = db.get_discovered_content(item_id)
+        if item is None:
+            summary["failed"] += 1
+            summary["failure_codes"]["item_not_found"] = summary["failure_codes"].get("item_not_found", 0) + 1
+            continue
+        video_id = item.get("youtube_video_id") or video_id_from_url(item.get("original_url"))
+        if not video_id:
+            record(item, {"metadata_checked_at": now, "metadata_status": "failed", "metadata_error": "not_a_youtube_video"})
+            continue
+        pending.append((item, video_id))
+
+    distinct_ids = list(dict.fromkeys(video_id for _, video_id in pending))
+    found: Dict[str, Dict[str, Any]] = {}
+    errors: Dict[str, str] = {}
+    for start in range(0, len(distinct_ids), MAX_METADATA_IDS_PER_CALL):
+        chunk = distinct_ids[start:start + MAX_METADATA_IDS_PER_CALL]
+        summary["api_call_attempts"] += 1
+        try:
+            found.update(fetch_video_metadata(chunk, api_key=api_key))
+        except YouTubeMetadataError as exc:
+            for video_id in chunk:
+                errors[video_id] = exc.code
+            logger.warning("discovery.metadata.batch_failed %s", json.dumps({"code": exc.code, "ids": len(chunk)}))
+
+    for item, video_id in pending:
+        if video_id in errors:
+            updates = {"metadata_checked_at": now, "youtube_video_id": video_id,
+                       "metadata_status": "failed", "metadata_error": errors[video_id]}
+        else:
+            updates = _metadata_from_meta(item, video_id, found.get(video_id), now)
+        record(item, updates)
+    logger.info("discovery.metadata.batch %s", json.dumps(summary, default=str))
+    return summary
 
 
 # ---------------------------------------------------------------- media
