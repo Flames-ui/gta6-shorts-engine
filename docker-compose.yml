@@ -1,0 +1,76 @@
+# Local, single-host stack: PostgreSQL, Redis, a one-shot migration, the API and one worker.
+# For multi-host deployment, use render.yaml or the equivalent on your platform.
+x-app-env: &app-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  DATABASE_URL: postgresql://studio:studio@postgres:5432/studio
+  REDIS_URL: redis://redis:6379/0
+  STORAGE_BACKEND: local
+  STORAGE_LOCAL_ROOT: /var/data/studio-storage
+  TEMP_DIR: /tmp/studio
+  AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?set AUTH_JWT_SECRET in .env (32+ characters)}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  AI_PROVIDER: ${AI_PROVIDER:-gemini}
+  YOUTUBE_RETRIEVAL_ENABLED: ${YOUTUBE_RETRIEVAL_ENABLED:-false}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: studio
+      POSTGRES_USER: studio
+      POSTGRES_PASSWORD: studio
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studio -d studio"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ["python", "-m", "app.migrate"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment: *app-env
+    ports: ["8000:8000"]
+    volumes: ["storage:/var/data/studio-storage"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment: *app-env
+    volumes: ["storage:/var/data/studio-storage", "hfcache:/var/cache/huggingface"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+    stop_grace_period: 60s
+
+volumes:
+  pgdata:
+  storage:
+  hfcache:

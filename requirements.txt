@@ -1,33 +1,15 @@
-# Core Framework & Server
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-httpx>=0.27.0
-pyjwt>=2.8.0
-cryptography>=42.0.0
-
-# Task Queue & Persistence
-redis>=5.0.0
-rq>=1.16.0
-supabase>=2.3.0
-
-# Media Processing & AI
-yt-dlp>=2024.1.1
-faster-whisper>=1.0.0
-google-genai>=1.0.0
-openai>=1.14.0
-opencv-python-headless>=4.8.0
-
-# YouTube Data API Publishing Integration
-google-api-python-client>=2.120.0
-google-auth-oauthlib>=1.2.0
-google-auth-httplib2>=0.2.0
-
-# Testing & Quality
-pytest>=8.0.0
-
-# Browser Automation & Marketplace Operator
-playwright>=1.40.0
+# Runtime dependencies for the API and the worker (same image, different commands).
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+pyjwt>=2.8,<3
+python-multipart>=0.0.9,<1
+httpx>=0.27,<1
+psycopg[binary]>=3.2,<4
+psycopg-pool>=3.2,<4
+redis>=5.0,<9
+rq>=1.16,<4
+yt-dlp>=2025.1.1
+faster-whisper>=1.1,<2
+google-genai>=1.0,<4

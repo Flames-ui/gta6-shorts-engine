@@ -1,39 +1,28 @@
-FROM python:3.11-slim-bookworm
+# One image, two processes: the API (default) and the worker (`python -m app.worker`).
+# FFmpeg/FFprobe (with libass for caption burn-in) are installed in the image.
+FROM python:3.13-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=8000
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/var/cache/huggingface
 
-# Install system dependencies: FFmpeg, ffprobe, subtitle/render fonts, OpenCV & GL runtimes, curl, git
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    fonts-dejavu-core \
-    fonts-freefont-ttf \
-    fontconfig \
-    libsm6 \
-    libxext6 \
-    libgl1 \
-    libglib2.0-0 \
-    git \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Install Python requirements
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
-# Copy application source code
 COPY . .
 
-# Create output and temporary directories for video rendering and processing
-RUN mkdir -p /var/data /app/output/clips /app/tmp && chmod -R 777 /var/data /app/output /app/tmp
+RUN useradd --create-home --uid 10001 studio \
+ && mkdir -p /var/data/studio-storage /tmp/studio /var/cache/huggingface \
+ && chown -R studio:studio /var/data/studio-storage /tmp/studio /var/cache/huggingface /app
 
+USER studio
 EXPOSE 8000
 
-# Default command starts FastAPI web service; Render worker overrides via dockerCommand
-CMD ["bash", "app/start_combined.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--timeout-graceful-shutdown", "30"]

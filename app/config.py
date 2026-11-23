@@ -1,160 +1,188 @@
-"""Application configuration settings."""
-import os
-from typing import List, Union
+"""Application configuration.
+
+All limits, timeouts and provider settings come from environment variables.
+`validate_settings()` reports every missing or invalid value at once so a
+misconfigured deployment fails at startup with a clear message.
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import List, Optional
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class ConfigError(RuntimeError):
+    """Raised when configuration is missing or invalid."""
+
+    def __init__(self, problems: List[str]):
+        self.problems = problems
+        super().__init__("Invalid configuration: " + "; ".join(problems))
+
+
 class Settings(BaseSettings):
-    # Service Information
-    APP_NAME: str = "GTA 6 Shorts Engine & Multi-Category Pipeline"
-    APP_VERSION: str = "2.0.0"
-    ENVIRONMENT: str = Field(default="production", description="Environment: development, test, production")
-    LOG_LEVEL: str = Field(default="INFO", description="Logging level: DEBUG, INFO, WARNING, ERROR")
-    PORT: int = Field(default=8000, description="Server port")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Security & Authentication
-    ENGINE_API_KEY: str = Field(default="", description="Secret API key required for /api/v1/ protected endpoints")
-    ENGINE_API_KEY_PREVIOUS: str = Field(default="", description="Previous key for graceful rotation")
-    SESSION_DB_PATH: str = Field(
-        default="/var/data/operator_sessions.sqlite3",
-        description="Path to SQLite database for persistent operator sessions on persistent disk (/var/data/operator_sessions.sqlite3)"
-    )
+    # --- Runtime -----------------------------------------------------------
+    APP_NAME: str = "AI Video Editing Studio"
+    ENVIRONMENT: str = Field(default="development", description="development | test | production")
+    LOG_LEVEL: str = "INFO"
+    CORS_ORIGINS: str = Field(default="http://localhost:5173", description="Comma-separated allowed origins")
 
-    FAIL_CLOSED_IN_PRODUCTION: bool = Field(default=True, description="Enforce strict authentication in production")
-    STRICT_CAMPAIGN_GATE_TEST: bool = Field(default=False)
-    ENFORCE_CAMPAIGN_GATE: bool = Field(
-        default=True,
-        description="Enforce strict campaign eligibility gate: No campaign, no clipping. Disallow direct clipping requests without an approved campaign."
-    )
-    DEFAULT_MONTHLY_EARNINGS_TARGET: float = Field(
-        default=500.0,
-        description="Target monthly earnings in USD for clipping operations"
-    )
-    PUBLISHING_AUTOMATION_ENABLED: bool = Field(
+    # --- Database (independent PostgreSQL) ---------------------------------
+    DATABASE_URL: str = Field(default="", description="postgresql://user:pass@host:5432/db")
+
+    # --- Authentication ----------------------------------------------------
+    AUTH_JWT_SECRET: str = Field(default="", description="HS256 secret used to verify bearer tokens")
+    AUTH_JWT_AUDIENCE: str = "authenticated"
+    AUTH_TOKEN_LEEWAY_SECONDS: int = 30
+    ADMIN_USER_IDS: str = Field(default="", description="Comma-separated user IDs with admin rights")
+    ADMIN_API_KEY: str = Field(default="", description="Optional operator key for diagnostics endpoints")
+
+    # --- Queue & workers ---------------------------------------------------
+    REDIS_URL: str = Field(default="", description="redis://host:6379/0")
+    QUEUE_NAME: str = "studio-jobs"
+    JOB_TIMEOUT_SECONDS: int = 7200
+    MAX_JOB_ATTEMPTS: int = 3
+    STALE_HEARTBEAT_SECONDS: int = 300
+    HEARTBEAT_INTERVAL_SECONDS: int = 15
+    MAX_PARALLEL_RENDERS: int = Field(default=2, ge=1, le=5)
+
+    # --- Storage -----------------------------------------------------------
+    STORAGE_BACKEND: str = Field(default="local", description="local | supabase")
+    STORAGE_LOCAL_ROOT: str = "/var/data/studio-storage"
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_STORAGE_BUCKET: str = "studio-private"
+    SIGNED_URL_TTL_SECONDS: int = 300
+    TEMP_DIR: str = "/tmp/studio"
+    SOURCE_RETENTION_DAYS: int = 30
+    TEMP_RETENTION_HOURS: int = 6
+
+    # --- Upload and source limits -----------------------------------------
+    MAX_UPLOAD_BYTES: int = Field(default=524_288_000, description="Max upload size (500 MiB)")
+    MAX_SOURCE_DURATION_SECONDS: int = Field(default=1800, description="Default maximum source length (30 min)")
+    MIN_SOURCE_DURATION_SECONDS: int = 20
+
+    # --- YouTube retrieval (yt-dlp) ---------------------------------------
+    YOUTUBE_RETRIEVAL_ENABLED: bool = Field(
         default=False,
-        description="Enable automated background publishing to external platforms. Must remain false during deployment testing to prevent unintended public posts."
+        description="Only enable for sources you have rights to. Disabled by default.",
     )
-    CORS_ORIGINS: Union[str, List[str]] = Field(
-        default=["https://lovable.dev", "https://lovable.app"],
-        description="Allowed CORS origins (comma-separated or list)"
-    )
+    YTDLP_TIMEOUT_SECONDS: int = 900
+    YTDLP_RETRIES: int = 2
+    YTDLP_MAX_HEIGHT: int = 1080
 
-    # Browser Automation & Marketplace Operator (Milestone 2)
-    BROWSER_PROFILE_DIR: str = Field(default="/tmp/browser_profile", description="Directory for persistent browser profile and cookies")
-    BROWSER_HEADLESS: bool = Field(default=True, description="Run Playwright browser in headless mode")
-    BROWSER_NAVIGATION_TIMEOUT_MS: int = Field(default=30000, description="Default page navigation timeout in milliseconds")
-    BROWSER_MAX_MEMORY_MB: int = Field(default=256, description="Memory constraint for browser process on 512MB RAM instance")
-    CONTENT_REWARDS_BASE_URL: str = Field(default="https://contentrewards.com", description="Official Content Rewards website base URL")
-    CAMPAIGN_REFRESH_INTERVAL_MINUTES: int = Field(default=60, description="Interval for background campaign detail refresh")
+    # --- AI and transcription ---------------------------------------------
+    AI_PROVIDER: str = Field(default="gemini", description="Highlight analysis provider: gemini")
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    AI_TIMEOUT_SECONDS: int = 120
+    AI_MAX_RETRIES: int = 3
+    WHISPER_MODEL: str = "base"
+    WHISPER_DEVICE: str = "cpu"
+    WHISPER_COMPUTE_TYPE: str = "int8"
 
-    # Supabase Integration
-    SUPABASE_URL: str = Field(default="", description="Supabase project URL")
-    SUPABASE_SERVICE_ROLE_KEY: str = Field(default="", description="Supabase service role secret key")
-    SUPABASE_JWT_SECRET: str = Field(default="", description="Secret to verify Supabase Auth user JWTs")
-    SUPABASE_STORAGE_BUCKET: str = Field(default="shorts", description="Supabase storage bucket for rendered clips")
+    # --- Clip selection and rendering -------------------------------------
+    CLIP_COUNT: int = 5  # fixed by product requirement; validated below
+    CLIP_MIN_SECONDS: int = 15
+    CLIP_MAX_SECONDS: int = 90
+    MIN_CLIP_SCORE: int = Field(default=75, ge=0, le=100)
+    OUTPUT_WIDTH: int = 1080
+    OUTPUT_HEIGHT: int = 1920
+    FFMPEG_TIMEOUT_SECONDS: int = 900
+    FFMPEG_THREADS: int = 0
+    CAPTION_PRESET: str = "bold_creator"
 
-    # Queue & Worker (Redis + RQ)
-    REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for task queue")
-    QUEUE_NAME: str = Field(default="viral-shorts", description="RQ queue name")
-    MAX_CONCURRENT_JOBS: int = Field(default=2, description="Worker concurrency limit")
-    JOB_TIMEOUT_SECONDS: int = Field(default=1800, description="Job processing timeout (seconds)")
+    # --- API protection ----------------------------------------------------
+    RATE_LIMIT_PER_MINUTE: int = 120
+    REQUEST_TIMEOUT_SECONDS: int = 60
 
-    # AI Models (Gemini primary, OpenAI fallback)
-    GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key for highlight detection & copywriting")
-    GEMINI_MODEL: str = Field(default="gemini-2.5-flash", description="Gemini model name")
-    OPENAI_API_KEY: str = Field(default="", description="Optional OpenAI API key")
-    OPENAI_MODEL: str = Field(default="gpt-4o-mini", description="OpenAI model name")
-    LLM_PROVIDER: str = Field(default="gemini", description="Default LLM provider: gemini or openai")
-
-    # Token Encryption at Rest & Admin Controls
-    TOKEN_ENCRYPTION_KEY: str = Field(default="", description="Secret key for encrypting OAuth tokens at rest")
-    ADMIN_USER_IDS: Union[str, List[str]] = Field(default=[], description="Server-controlled list of admin user IDs")
-    ADMIN_EMAILS: Union[str, List[str]] = Field(default=[], description="Server-controlled list of admin emails")
-
-    # Buffer Social Publishing Integration (Primary Publisher)
-    BUFFER_CLIENT_ID: str = Field(default="", description="Buffer OAuth Client ID")
-    BUFFER_CLIENT_SECRET: str = Field(default="", description="Buffer OAuth Client Secret")
-    BUFFER_ACCESS_TOKEN: str = Field(default="", description="Buffer user access token")
-    BUFFER_REDIRECT_URI: str = Field(default="", description="Buffer OAuth callback URL")
-
-    # YouTube Data API OAuth (Secondary / Direct Publishing)
-    YOUTUBE_CLIENT_ID: str = Field(default="", description="Google Cloud OAuth Client ID")
-    YOUTUBE_CLIENT_SECRET: str = Field(default="", description="Google Cloud OAuth Client Secret")
-    YOUTUBE_REDIRECT_URI: str = Field(default="", description="Google OAuth Redirect URI")
-    YOUTUBE_API_KEY: str = Field(default="", description="YouTube Data API key; only needed to resolve @handle and legacy channel URLs")
-
-    # Production Limits & Scheduling
-    DAILY_TARGET_MIN: int = Field(default=3, description="Target minimum daily videos (Milestones 2.2 & 3: 3-5 target)")
-    DAILY_TARGET_MAX: int = Field(default=5, description="Target maximum daily videos (Milestones 2.2 & 3: 3-5 target)")
-    MAX_VIDEO_DURATION_SECONDS: int = Field(default=7200, description="Maximum allowed input video duration")
-    MAX_REQUEST_BODY_SIZE_BYTES: int = Field(default=104857600, description="Max request body size (100MB)")
-
-    # Local Video Processing Settings
-    LOCAL_WHISPER_MODEL: str = Field(default="base", description="Whisper model: tiny, base, small, medium, large-v3")
-    LOCAL_WHISPER_DEVICE: str = Field(default="auto", description="Whisper device: auto, cpu, cuda")
-    LOCAL_OUTPUT_DIR: str = Field(default="output", description="Local directory for temporary renders")
-    TEMP_DIR: str = Field(default="/app/tmp", description="Temporary working directory for video operations")
-
-    OUTPUT_DIR: str = Field(default="output", description="Output directory alias")
-    DEFAULT_NUM_CLIPS: int = Field(default=3, description="Default number of clips to extract")
-    DEFAULT_ASPECT_RATIO: str = Field(default="9:16", description="Default video aspect ratio")
-
-    # Legacy / Optional External API Mode
-    MUAPI_API_KEY: str = Field(default="", description="Optional MuAPI key")
-    MUAPI_BASE_URL: str = Field(default="https://api.muapi.ai/api/v1", description="MuAPI base URL")
-
-    @field_validator("ADMIN_USER_IDS", mode="before")
+    @field_validator("ENVIRONMENT")
     @classmethod
-    def parse_admin_user_ids(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str):
-            return [x.strip() for x in v.split(",") if x.strip()]
-        return v or []
-
-    @field_validator("ADMIN_EMAILS", mode="before")
-    @classmethod
-    def parse_admin_emails(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str):
-            return [x.strip().lower() for x in v.split(",") if x.strip()]
-        return [x.lower() for x in v] if v else []
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str):
-            if v.strip() == "*":
-                return ["*"]
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
+    def _env(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"development", "test", "production"}:
+            raise ValueError("ENVIRONMENT must be development, test or production")
         return v
 
-    def get_effective_cors_origins(self) -> List[str]:
-        """Return safe CORS origins based on environment."""
-        if self.ENVIRONMENT.lower() in ("development", "test"):
-            # Include local development frontends
-            local_origins = [
-                "http://localhost:3000",
-                "http://localhost:5173",
-                "http://localhost:8000",
-                "http://localhost:8080",
-                "http://127.0.0.1:3000",
-                "http://127.0.0.1:5173",
-                "http://127.0.0.1:8000",
-            ]
-            if isinstance(self.CORS_ORIGINS, list):
-                return list(set(self.CORS_ORIGINS + local_origins))
-            return local_origins
+    @field_validator("STORAGE_BACKEND")
+    @classmethod
+    def _storage(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"local", "supabase"}:
+            raise ValueError("STORAGE_BACKEND must be local or supabase")
+        return v
 
-        # In production, never return wildcard if credentials are used
-        if isinstance(self.CORS_ORIGINS, list):
-            cleaned = [o for o in self.CORS_ORIGINS if o != "*"]
-            return cleaned or ["https://lovable.dev", "https://lovable.app"]
-        return ["https://lovable.dev", "https://lovable.app"]
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT == "production"
+
+    @property
+    def cors_origins(self) -> List[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip() and o.strip() != "*"]
+
+    @property
+    def admin_user_ids(self) -> set:
+        return {x.strip() for x in self.ADMIN_USER_IDS.split(",") if x.strip()}
 
 
-settings = Settings()
+def _problems(s: Settings) -> List[str]:
+    problems: List[str] = []
+    if s.CLIP_COUNT != 5:
+        problems.append("CLIP_COUNT must be 5: the product always renders exactly five clips")
+    if s.CLIP_MIN_SECONDS < 5 or s.CLIP_MAX_SECONDS > 180 or s.CLIP_MIN_SECONDS >= s.CLIP_MAX_SECONDS:
+        problems.append("CLIP_MIN_SECONDS must be >=5, CLIP_MAX_SECONDS <=180 and smaller than the maximum")
+    if s.MAX_SOURCE_DURATION_SECONDS < 60:
+        problems.append("MAX_SOURCE_DURATION_SECONDS must be at least 60")
+    if s.MAX_UPLOAD_BYTES < 1_000_000:
+        problems.append("MAX_UPLOAD_BYTES must be at least 1 MB")
+    if s.OUTPUT_WIDTH % 2 or s.OUTPUT_HEIGHT % 2:
+        problems.append("OUTPUT_WIDTH and OUTPUT_HEIGHT must be even numbers")
+    if not s.DATABASE_URL.startswith(("postgresql://", "postgres://")):
+        problems.append("DATABASE_URL must be a postgresql:// URL")
+    if s.STORAGE_BACKEND == "supabase":
+        if not s.SUPABASE_URL.startswith("https://"):
+            problems.append("SUPABASE_URL must be an https URL when STORAGE_BACKEND=supabase")
+        if not s.SUPABASE_SERVICE_ROLE_KEY:
+            problems.append("SUPABASE_SERVICE_ROLE_KEY is required when STORAGE_BACKEND=supabase")
+    if s.is_production:
+        if len(s.AUTH_JWT_SECRET) < 32:
+            problems.append("AUTH_JWT_SECRET must be at least 32 characters in production")
+        if not s.REDIS_URL.startswith(("redis://", "rediss://")):
+            problems.append("REDIS_URL is required in production (redis:// or rediss://)")
+        if s.STORAGE_BACKEND == "local" and not s.STORAGE_LOCAL_ROOT.startswith("/"):
+            problems.append("STORAGE_LOCAL_ROOT must be an absolute path in production")
+        if s.AI_PROVIDER.lower() == "gemini" and not s.GEMINI_API_KEY:
+            problems.append("GEMINI_API_KEY is required for highlight analysis")
+    if s.AI_PROVIDER.lower() not in {"gemini", "fake"}:
+        problems.append("AI_PROVIDER must be gemini")
+    if s.AI_PROVIDER.lower() == "fake" and s.is_production:
+        problems.append("AI_PROVIDER=fake is not allowed in production")
+    return problems
+
+
+def validate_database_settings(s: Optional[Settings] = None) -> Settings:
+    """Validate only what the migration step needs, so a release job does not require provider keys."""
+    s = s or get_settings()
+    if not s.DATABASE_URL.startswith(("postgresql://", "postgres://")):
+        raise ConfigError(["DATABASE_URL must be a postgresql:// URL"])
+    return s
+
+
+def validate_settings(s: Optional[Settings] = None) -> Settings:
+    """Return validated settings or raise ConfigError listing every problem."""
+    s = s or get_settings()
+    problems = _problems(s)
+    if problems:
+        raise ConfigError(problems)
+    return s
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

@@ -11,3 +11,12 @@ output/
 *.db
 app_dev.db
 *.log
+
+# studio backend
+.ruff_cache/
+*.mp4
+!tests/fixtures/*.mp4
+/tmp/
+storage/
+.env.*
+!.env.example
